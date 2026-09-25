@@ -1,0 +1,30 @@
+{
+  "tasks": {
+    "awaken": true,
+    "recruit": false,
+    "infrast": true,
+    "combat": true,
+    "credit": true,
+    "reward": true
+  },
+  "fight": {
+    "stage": "1-7",
+    "times": 5,
+    "series": 0,
+    "medicine_mode": "auto",
+    "medicine": 999
+  },
+  "annihilation": {
+    "enabled": true,
+    "auto": true,
+    "times": 4
+  },
+  "signin": {
+    "enabled": true
+  },
+  "daily": {
+    "enabled": false,
+    "time": "08:00"
+  },
+  "last_daily_run": ""
+}

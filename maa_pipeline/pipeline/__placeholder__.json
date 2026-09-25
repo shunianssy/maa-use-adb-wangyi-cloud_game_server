@@ -1,0 +1,37 @@
+{
+  "StartUp": {
+    "action": "Click",
+    "target": [640, 360],
+    "next": ["Award"]
+  },
+  "Award": {
+    "action": "Click",
+    "target": [640, 360],
+    "next": ["Recruit"]
+  },
+  "Recruit": {
+    "action": "Click",
+    "target": [640, 360],
+    "next": ["Infrast"]
+  },
+  "Infrast": {
+    "action": "Click",
+    "target": [640, 360],
+    "next": ["Fight"]
+  },
+  "Fight": {
+    "action": "Click",
+    "target": [640, 360],
+    "next": ["Mall"]
+  },
+  "Mall": {
+    "action": "Click",
+    "target": [640, 360],
+    "next": ["Hog"]
+  },
+  "Hog": {
+    "action": "Click",
+    "target": [640, 360],
+    "next": []
+  }
+}

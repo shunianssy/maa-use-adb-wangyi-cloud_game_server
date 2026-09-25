@@ -1,0 +1,10 @@
+# 构建上下文排除项: 避免把本地虚拟环境/凭证/缓存打入镜像
+# 注意: Dockerfile 与 entrypoint.sh 必须保留在上下文中
+.venv
+**/__pycache__
+**/*.pyc
+.git
+token
+demo.jpg
+demo2.png
+*.log

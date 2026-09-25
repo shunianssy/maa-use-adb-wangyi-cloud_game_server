@@ -1,0 +1,7 @@
+# 云游戏服务端依赖(含 sdk 子模块: aiortc / websockets / requests / aiohttp 等)
+-r sdk/requirements.txt
+
+# MAA 桥接依赖
+# MaaFw 为 MaaFramework 的官方 Python 绑定, 安装包自带 libMaaFramework 运行时库
+numpy>=1.26.0
+MaaFw>=5.13.1

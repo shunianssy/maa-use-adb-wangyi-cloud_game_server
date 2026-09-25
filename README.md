@@ -34,6 +34,9 @@ git clone --recurse-submodules https://github.com/Tokisaki-Galaxy/netease_cloud_
 cd netease_cloud_game_server
 ```
 
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
 ### 3. 安装依赖
 
 依赖项在 `sdk` 目录的 `requirements.txt` 文件中。
@@ -48,8 +51,11 @@ pip install -r sdk/requirements.txt
 直接运行 `server.py` 即可启动 API 服务。此时服务已在运行，但尚未连接到云游戏。
 
 ```bash
+.\.venv\Scripts\Activate.ps1
 python server.py
 ```
+
+
 
 服务成功启动后，您会看到类似以下的输出：
 

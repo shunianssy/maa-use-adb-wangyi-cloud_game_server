@@ -1,0 +1,22 @@
+# 网易云游戏 MAA 桥接 - 服务器端编排示例
+# 用法:
+#   docker compose up -d --build
+#   docker compose logs -f
+services:
+  netease-maa:
+    build: .
+    image: netease-cloud-game-maa
+    container_name: netease-cloud-game-maa
+    ports:
+      - "22888:22888"
+    environment:
+      # 无交互登录二选一(推荐环境变量): 登录后获得的 token
+      - NETEASE_HOST=0.0.0.0
+      - NETEASE_PORT=22888
+      - NETEASE_GAME_CODE=mrfz
+      # - NETEASE_TOKEN=your-token-here
+    volumes:
+      # 可选: 挂载 MAA pipeline 资源 bundle(含 pipeline/ image/ model/ 目录)
+      - ./maa_resource:/app/resource:ro
+    command: ["--resource", "/app/resource"]
+    restart: unless-stopped
