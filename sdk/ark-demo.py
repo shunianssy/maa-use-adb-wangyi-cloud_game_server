@@ -163,7 +163,7 @@ async def test(game_code: str):
         if not ready:
             print("[!] timeout: video never started streaming.")
         else:
-            print("[✓] video stream ready, you can now send actions.")
+            print("[OK] video stream ready, you can now send actions.")
     else:
         print("[!] no video track, exiting.")
         return
@@ -173,7 +173,7 @@ async def test(game_code: str):
     async def do_snap(fmt=DEFAULT_SNAPSHOT_FORMAT):
         ok = await snapshotper.snapshot(fmt=fmt)
         if ok:
-            print(f"[✓] snapshot ({fmt}) done")
+            print(f"[OK] snapshot ({fmt}) done")
         else:
             print("[snap] failed")
 
@@ -224,7 +224,7 @@ async def test(game_code: str):
         await pc.close()
         await sock.close()
 
-        print("[✓] closed cleanly")
+        print("[OK] closed cleanly")
 
 
 if __name__ == "__main__":

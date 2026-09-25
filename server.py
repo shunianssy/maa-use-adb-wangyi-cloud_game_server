@@ -25,14 +25,21 @@ from sdk.wsconnect import (
     connect, object_from_string, encode_mess,
     pack_message, send_action, login, exit_game
 )
-from sdk.signin import netease_signin
 from maa_settings import MaaSettings
+# 登录与签到统一走 netease_login(按线上接口抓包修正, 替代 sdk/signin.py 的探测式实现)
+from netease_login import (
+    login_with_captcha, login_with_password, netease_signin,
+    read_token, request_sms_code, save_token,
+)
 
 # --- 配置 ---
 # 服务器端部署时可通过环境变量覆盖以下配置(见 Docker/生产环境使用方式)
 # NETEASE_TOKEN: 登录凭证,直接写入 TOKEN_FILE,实现无交互部署
 GAME_CODE = os.environ.get("NETEASE_GAME_CODE", "mrfz")
-TOKEN_FILE = os.environ.get("NETEASE_TOKEN_FILE", "token")
+# token 文件默认放在脚本所在目录(绝对路径): 无论从哪个工作目录启动服务都能读到"已登录"状态
+TOKEN_FILE = os.environ.get(
+    "NETEASE_TOKEN_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "token"))
 HOST = os.environ.get("NETEASE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NETEASE_PORT", "22888"))
 WIDTH = int(os.environ.get("NETEASE_WIDTH", "1280"))
@@ -662,11 +669,13 @@ async def handle_maa_adb_log(request: web.Request):
 async def handle_maa_start(request: web.Request):
     """启动「一键长草」: 接收启用的任务 key 列表并执行。
 
-    请求体: {"tasks": [str...], "options": {作战选项(可选)}}
+    请求体: {"tasks": [str...], "options": {运行选项(可选)}}
     - tasks 可含 "annihilation"(每周剿灭)
-    - options.fight: {stage, times, series, medicine_enabled, medicine}
-    - options.annihilation: {times}
-    未提供的作战项回落到已保存设置(maa_settings.json)。
+    - options.fight: {stage, times(正整数或 "auto"), medicine_mode, medicine}
+    - options.annihilation: {auto, times}
+    - options.infrast: 基建设置(mode/facility/drones/threshold/...)
+    - options.award: 领取奖励细分项
+    未提供的选项回落到已保存设置(maa_settings.json)。
     """
     try:
         data = await request.json()
@@ -678,19 +687,38 @@ async def handle_maa_start(request: web.Request):
     if not isinstance(tasks, list) or not tasks:
         return web.json_response({"status": "error", "message": "请至少启用一个任务"}, status=400)
 
-    # 作战选项与已保存设置合并: 表单值优先, 缺失字段用设置默认
+    # 「开始唤醒」包含启动云游戏: 勾选 awaken 且云游戏未就绪时, 先启动并等待画面就绪
+    coord = _get_coord()
+    if "awaken" in tasks and not app_state.is_ready:
+        if not (app_state.token or read_token(TOKEN_FILE)):
+            return web.json_response(
+                {"status": "error", "message": "尚未登录云游戏账号, 请先在「云游戏账号」卡片登录"},
+                status=400)
+        coord.status.log("「开始唤醒」已勾选: 自动启动云游戏...")
+        ok, msg = await _handle_start_internal()
+        if not ok:
+            coord.status.log(f"启动云游戏失败: {msg}")
+            return web.json_response({"status": "error", "message": msg}, status=400)
+        if not await _wait_game_ready(90):
+            coord.status.log("等待云游戏就绪超时, 一键长草未执行")
+            return web.json_response(
+                {"status": "error", "message": "云游戏启动超时(请检查网络/账号剩余时长)"},
+                status=400)
+        coord.status.log("云游戏已就绪, 开始执行一键长草")
+
+    # 运行选项与已保存设置合并: 表单值优先, 缺失字段用设置默认
     saved = maa_settings.get()
     merged = {
         "fight": {**saved["fight"], **(options.get("fight") or {})},
         "annihilation": {**saved["annihilation"], **(options.get("annihilation") or {})},
+        "infrast": {**saved["infrast"], **(options.get("infrast") or {})},
         "signin": {**saved["signin"], **(options.get("signin") or {})},
         "award": {**saved["award"], **(options.get("award") or {})},
     }
 
-    coord = _get_coord()
     do_signin = bool(merged.get("signin", {}).get("enabled", False))
-    started = coord.start(tasks, options=merged,
-                          signin=do_signin, token=app_state.token)
+    started = coord.start(tasks, options=merged, signin=do_signin,
+                          token=app_state.token or read_token(TOKEN_FILE))
     if not started:
         return web.json_response({"status": "error", "message": coord.status.snapshot().get("error") or "已有一个任务在运行或未选择任务"}, status=400)
 
@@ -715,25 +743,30 @@ async def handle_maa_settings_save(request: web.Request):
 
 
 async def handle_maa_signin(request: web.Request):
-    """执行网易云游戏每日签到(平台奖励), 结果写入一键长草日志并返回。"""
-    token = app_state.token
+    """执行网易云游戏每日签到(平台奖励), 结果写入一键长草日志并返回。
+
+    token 优先取进程内会话, 缺失时回落到 token 文件 —— 只要已登录(有 token 文件)
+    即可签到, 无需先启动云游戏。
+    """
+    token = app_state.token or read_token(TOKEN_FILE) or ""
     if not token:
         return web.json_response(
-            {"status": "error", "message": "未登录云游戏账号(token 缺失), 请先启动云游戏"},
+            {"status": "error", "message": "未登录云游戏账号, 请先在「云游戏账号」卡片登录"},
             status=400)
+    app_state.token = app_state.token or token
 
     coord = _get_coord()
     coord.status.log("发起网易云游戏签到...")
     loop = asyncio.get_running_loop()
     try:
-        # requests 为阻塞调用, 放入线程池避免阻塞事件循环
+        # requests 为阻塞调用, 放入线程池避免阻塞事件循环(内部含 2 次请求)
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, netease_signin, token), timeout=15)
+            loop.run_in_executor(None, netease_signin, token), timeout=25)
     except (asyncio.TimeoutError, Exception) as e:
         result = {"ok": False, "message": f"签到超时/异常: {e}"}
 
     coord.status.log(f"签到{'成功' if result.get('ok') else '失败'}: "
-                     f"{result.get('endpoint') or result.get('message')}")
+                     f"{result.get('message', '')}")
     return web.json_response({"status": "ok" if result.get("ok") else "error", "result": result})
 
 
@@ -747,11 +780,79 @@ async def _wait_game_ready(timeout: float = 90.0) -> bool:
     return False
 
 
+async def _run_daily_flow(trigger: str) -> tuple:
+    """执行一次「启动云游戏 → 一键长草」流程(每日定时与「测试执行」共用)。
+
+    Args:
+        trigger: 触发来源描述(写入一键长草日志)
+
+    Returns:
+        (ok, message): ok 表示一键长草是否成功启动
+    """
+    maa_log = _get_coord().status
+    maa_log.log(f"{trigger}: 启动云游戏...")
+    ok, msg = await _handle_start_internal()
+    if not ok:
+        maa_log.log(f"{trigger}: 启动云游戏失败: {msg}")
+        return False, msg
+    if not await _wait_game_ready(90):
+        maa_log.log(f"{trigger}: 等待云游戏就绪超时")
+        return False, "等待云游戏就绪超时"
+
+    cfg = maa_settings.get()
+    # 组装任务: 已启用开关 + 可选剿灭
+    enabled = [k for k, v in (cfg.get("tasks") or {}).items() if v]
+    if (cfg.get("annihilation") or {}).get("enabled"):
+        enabled.append("annihilation")
+    if not enabled:
+        maa_log.log(f"{trigger}: 未启用任何任务, 已跳过一键长草")
+        return False, "未启用任何任务"
+
+    opts = {"fight": cfg["fight"], "annihilation": cfg["annihilation"],
+            "infrast": cfg["infrast"], "award": cfg["award"]}
+    do_signin = bool((cfg.get("signin") or {}).get("enabled", False))
+    started = _get_coord().start(enabled, options=opts, signin=do_signin,
+                                 token=app_state.token or read_token(TOKEN_FILE))
+    if not started:
+        maa_log.log(f"{trigger}: 一键长草启动失败(可能已有任务在运行)")
+        return False, "一键长草启动失败(可能已有任务在运行)"
+    maa_log.log(f"{trigger}: 自动执行一键长草 {', '.join(enabled)}")
+    await broadcast_status()
+    return True, "任务已启动"
+
+
+# 「测试执行」等后台任务的强引用集合(避免 asyncio 任务被垃圾回收)
+_bg_tasks: set = set()
+
+
+def _spawn_bg(coro) -> None:
+    """把协程放到后台执行并保留引用, 异常写日志(不打断调用方)。"""
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    task.add_done_callback(
+        lambda t: logging.error("后台任务异常: %s", t.exception())
+        if not t.cancelled() and t.exception() else None)
+
+
+async def handle_maa_daily_test(request: web.Request):
+    """「测试执行」: 立即执行一次每日流程(启动云游戏 → 一键长草)。
+
+    说明: 不影响 last_daily_run 记录(当天定时仍会照常触发); 因等待云游戏就绪耗时较长,
+    这里后台执行并立即返回, 进度请查看一键长草日志。
+    """
+    if _get_coord().running:
+        return web.json_response(
+            {"status": "error", "message": "已有一键长草任务在运行"}, status=400)
+    _spawn_bg(_run_daily_flow("测试执行"))
+    return web.json_response(
+        {"status": "ok", "message": "测试执行已开始(启动云游戏 → 一键长草), 请查看日志"})
+
+
 async def daily_checker():
     """每日定时任务: 到达设置时间且当天未执行过时, 自动启动云游戏并一键长草。
 
     触发时机: 设置 enable=true 且当前 HH:MM == daily.time 且 last_daily_run != 今天。
-    触发后: 1) 启动云游戏 2) 等待就绪 3) 按已保存设置启动一键长草。
     """
     while True:
         try:
@@ -764,24 +865,7 @@ async def daily_checker():
                 if hhmm == str(daily.get("time", "")) and cfg.get("last_daily_run") != today:
                     logging.info("每日定时触发: %s, 开始自动执行", hhmm)
                     maa_settings.update({"last_daily_run": today})
-                    maa_log = _get_coord().status
-                    maa_log.log(f"每日定时任务触发({hhmm}), 启动云游戏...")
-                    await _handle_start_internal()
-                    if not await _wait_game_ready(90):
-                        maa_log.log("每日定时: 等待云游戏就绪超时")
-                        continue
-                    # 组装任务: 已启用开关 + 可选剿灭
-                    enabled = [k for k, v in (cfg.get("tasks") or {}).items() if v]
-                    if (cfg.get("annihilation") or {}).get("enabled"):
-                        enabled.append("annihilation")
-                    if enabled:
-                        opts = {"fight": cfg["fight"], "annihilation": cfg["annihilation"],
-                                "award": cfg["award"]}
-                        do_signin = bool((cfg.get("signin") or {}).get("enabled", False))
-                        _get_coord().start(enabled, options=opts,
-                                           signin=do_signin, token=app_state.token)
-                        maa_log.log(f"每日定时: 自动执行一键长草 {', '.join(enabled)}")
-                        await broadcast_status()
+                    await _run_daily_flow(f"每日定时任务触发({hhmm})")
             await asyncio.sleep(30)   # 每 30 秒检查一次, 粒度足够
         except asyncio.CancelledError:
             break
@@ -806,36 +890,173 @@ async def handle_maa_status(request: web.Request):
     snap["ws_clients"] = sum(1 for w in _ws_clients if not w.closed)
     return web.json_response(snap)
 
+# --- 网易云游戏账号登录接口(WebUI 账号卡片) ---
+
+async def handle_login_sms(request: web.Request):
+    """发送短信验证码: POST /api/login/sms  {"phone": "138..."}。
+
+    requests 为阻塞调用, 放线程池执行, 避免阻塞事件循环。
+    """
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, AttributeError):
+        return web.json_response(
+            {"status": "error", "message": "请求体不是合法 JSON"}, status=400)
+
+    phone = str((data or {}).get("phone", "")).strip()
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, request_sms_code, phone), timeout=15)
+    except (asyncio.TimeoutError, Exception) as e:
+        logging.warning("发送短信验证码异常: %s", e)
+        result = {"ok": False, "message": f"发送验证码超时/异常: {e}"}
+
+    if not result.get("ok"):
+        return web.json_response(
+            {"status": "error", "message": result.get("message", "发送验证码失败")},
+            status=400)
+    return web.json_response(
+        {"status": "ok", "message": result.get("message", "验证码已发送")})
+
+
+def _apply_login_token(token: str, source: str) -> str:
+    """登录成功后统一处理: token 落盘 + 进程内状态更新。
+
+    Args:
+        token: 新登录 token
+        source: 登录方式(日志用: sms/password)
+
+    Returns:
+        面向用户的提示文案(云游戏会话进行中时说明"下次启动生效")
+    """
+    saved = save_token(token, TOKEN_FILE)
+    # 云游戏会话进行中: token 变更只落盘, 避免影响当前会话的退出/签到使用的账号
+    session_active = bool(app_state.cloud_game_task and not app_state.cloud_game_task.done())
+    if session_active:
+        message = "登录成功(当前云游戏会话仍使用原账号, 下次启动生效)"
+    else:
+        app_state.token = token
+        message = "登录成功"
+    if not saved:
+        message += "; 但 token 落盘失败, 重启后需重新登录"
+    logging.info("云游戏账号登录成功(source=%s, token_saved=%s, session_active=%s)",
+                 source, saved, session_active)
+    return message
+
+
+async def handle_login_verify(request: web.Request):
+    """提交短信验证码登录: POST /api/login/verify  {"phone": "...", "code": "..."}。
+
+    成功后 token 立即落盘(供下次启动云游戏复用); 若当前没有进行中的云游戏会话,
+    同时写入进程内 app_state, 便于直接使用「云游戏签到」等功能。
+    """
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, AttributeError):
+        return web.json_response(
+            {"status": "error", "message": "请求体不是合法 JSON"}, status=400)
+
+    data = data or {}
+    phone = str(data.get("phone", "")).strip()
+    code = str(data.get("code", "")).strip()
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, login_with_captcha, phone, code), timeout=20)
+    except (asyncio.TimeoutError, Exception) as e:
+        logging.warning("云游戏登录异常: %s", e)
+        result = {"ok": False, "message": f"登录超时/异常: {e}"}
+
+    if not result.get("ok") or not result.get("token"):
+        return web.json_response(
+            {"status": "error", "message": result.get("message", "登录失败")}, status=400)
+
+    return web.json_response(
+        {"status": "ok", "message": _apply_login_token(result["token"], "sms")})
+
+
+async def handle_login_password(request: web.Request):
+    """密码登录: POST /api/login/password  {"phone": "...", "password": "..."}。
+
+    说明: 网易云游戏的密码登录需要先携带**当前有效 token** 获取加密参数
+    (接口 /api/v2/user-pwd-info 要求登录态), 因此 token 已失效时请改用短信验证码登录。
+    """
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, AttributeError):
+        return web.json_response(
+            {"status": "error", "message": "请求体不是合法 JSON"}, status=400)
+
+    data = data or {}
+    phone = str(data.get("phone", "")).strip()
+    password = str(data.get("password", ""))
+    # 当前 token: 进程内优先, 缺失时回落到 token 文件
+    current_token = app_state.token or read_token(TOKEN_FILE) or ""
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, login_with_password, current_token, phone, password),
+            timeout=25)
+    except (asyncio.TimeoutError, Exception) as e:
+        logging.warning("密码登录异常: %s", e)
+        result = {"ok": False, "message": f"登录超时/异常: {e}"}
+
+    if not result.get("ok") or not result.get("token"):
+        return web.json_response(
+            {"status": "error", "message": result.get("message", "登录失败")}, status=400)
+
+    return web.json_response(
+        {"status": "ok", "message": _apply_login_token(result["token"], "password")})
+
+
+async def handle_login_status(request: web.Request):
+    """查询登录状态: GET /api/login/status[?remaining=1]。
+
+    remaining=1 时额外拉取云游戏剩余时长(较慢, 前端仅在页面加载与登录后调用)。
+    """
+    token = app_state.token or read_token(TOKEN_FILE) or ""
+    payload = {"status": "ok", "logged_in": bool(token)}
+    if token and request.query.get("remaining") == "1":
+        loop = asyncio.get_running_loop()
+        try:
+            info = await asyncio.wait_for(
+                loop.run_in_executor(None, fetch_user_info, token), timeout=8)
+        except (asyncio.TimeoutError, Exception):
+            info = {}
+        if info:
+            payload["remaining_time"] = info.get("free_time_left")
+    return web.json_response(payload)
+
+
 # --- 云游戏连接逻辑 ---
 async def run_cloud_game():
     try:
-        try:
-            token = open(TOKEN_FILE).read().strip()
-        except FileNotFoundError:
-            token = ""
+        # token 来源优先级: token 文件(含 WebUI 登录写入) -> NETEASE_TOKEN 环境变量 -> 终端交互登录
+        token = read_token(TOKEN_FILE) or ""
         if not token:
             # 服务器端(无交互环境)优先使用 NETEASE_TOKEN 环境变量
             env_token = os.environ.get("NETEASE_TOKEN", "").strip()
             if env_token:
                 token = env_token
-                try:
-                    with open(TOKEN_FILE, "w") as f:
-                        f.write(token)
-                    print(f"{Colors.GREEN}[✓] Token loaded from NETEASE_TOKEN env.{Colors.RESET}")
-                except OSError as e:
-                    print(f"{Colors.YELLOW}[!] Failed to persist token file: {e}{Colors.RESET}", file=sys.stderr)
+                if save_token(token, TOKEN_FILE):
+                    print(f"{Colors.GREEN}[OK] Token loaded from NETEASE_TOKEN env.{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}[!] Failed to persist token file.{Colors.RESET}", file=sys.stderr)
             elif sys.stdin.isatty():
                 # 仅在有交互终端时走手机号登录,避免无头环境永久阻塞
                 pnum = input(f"{Colors.YELLOW}Input your phone number (will not be stored): {Colors.RESET}").strip()
                 login("86-" + pnum)
-                token = open(TOKEN_FILE).read().strip()
+                token = read_token(TOKEN_FILE) or ""
                 if not token:
                     print(f"{Colors.RED}Login failed, exiting task.{Colors.RESET}", file=sys.stderr)
                     return
             else:
-                # 无 TTY 且无环境变量:明确报错而非阻塞
+                # 无 TTY 且无环境变量:明确报错而非阻塞(可先在 WebUI 账号卡片中登录)
                 msg = ("Login required but running in non-interactive environment. "
-                       "Set NETEASE_TOKEN env var or mount a token file.")
+                       "Login from the WebUI account panel, or set NETEASE_TOKEN env var "
+                       "or mount a token file.")
                 print(f"{Colors.RED}[!] {msg}{Colors.RESET}", file=sys.stderr)
                 logging.error(msg)
                 return
@@ -878,7 +1099,7 @@ async def run_cloud_game():
         
         if app_state.snapshotter and await app_state.snapshotter.wait_ready():
             app_state.is_ready = True
-            print(f"{Colors.GREEN}{Colors.BOLD}[✓] Cloud game ready. API is active.{Colors.RESET}")
+            print(f"{Colors.GREEN}{Colors.BOLD}[OK] Cloud game ready. API is active.{Colors.RESET}")
             await broadcast_status()  # 通知 WebUI 前端已就绪
         else:
             app_state.is_ready = False
@@ -926,7 +1147,7 @@ async def run_cloud_game():
         if sock_to_close and sock_to_close.close_code is None:
             await close_with_timeout(sock_to_close.close())
         
-        print(f"{Colors.GREEN}[✓] Cloud game resources cleaned up.{Colors.RESET}")
+        print(f"{Colors.GREEN}[OK] Cloud game resources cleaned up.{Colors.RESET}")
         try:
             await broadcast_status()  # 通知前端云游戏已断开
         except Exception:
@@ -1045,6 +1266,8 @@ async def run_server():
     access_log = logging.getLogger("aiohttp.access")
 
     app = web.Application()
+    # 启动时预加载 token 文件: 存在 token 即视为「已登录」(签到/密码登录等无需先启动云游戏)
+    app_state.token = app_state.token or read_token(TOKEN_FILE) or ""
     # WebUI 静态资源(style.css / app.js 等)
     if os.path.isdir(os.path.join(WEBUI_DIR, "static")):
         app.router.add_static("/static/", os.path.join(WEBUI_DIR, "static"), name="webui_static")
@@ -1066,11 +1289,18 @@ async def run_server():
         web.get('/maa/settings', handle_maa_settings_get),
         web.post('/maa/settings', handle_maa_settings_save),
         web.post('/maa/signin', handle_maa_signin),
+        # 网易云游戏账号登录(WebUI 账号卡片)
+        web.post('/api/login/sms', handle_login_sms),
+        web.post('/api/login/verify', handle_login_verify),
+        web.post('/api/login/password', handle_login_password),
+        web.get('/api/login/status', handle_login_status),
+        # 每日定时「测试执行」: 立即跑一次 启动云游戏 → 一键长草
+        web.post('/maa/daily/test', handle_maa_daily_test),
     ])
 
     # 打印 WebUI 访问入口提示
     ui_addr = f"http://{HOST}:{PORT}/"
-    print(f"{Colors.GREEN}[✓] WebUI console available at {ui_addr}{Colors.RESET}")
+    print(f"{Colors.GREEN}[OK] WebUI console available at {ui_addr}{Colors.RESET}")
     
     app.on_cleanup.append(cleanup_background_tasks)
     
@@ -1086,10 +1316,10 @@ async def run_server():
     # 启动每日定时检查任务(到期自动执行云游戏 + 一键长草)
     global _daily_checker_task
     _daily_checker_task = asyncio.create_task(daily_checker())
-    print(f"{Colors.GREEN}[✓] 每日定时任务已启用(当前设置: "
+    print(f"{Colors.GREEN}[OK] 每日定时任务已启用(当前设置: "
           f"{'开启 ' + maa_settings.get()['daily'].get('time', '') if maa_settings.get()['daily'].get('enabled') else '关闭'}){Colors.RESET}")
     
-    print(f"{Colors.GREEN}{Colors.BOLD}[✓] API server is running at http://{HOST}:{PORT}{Colors.RESET}")
+    print(f"{Colors.GREEN}{Colors.BOLD}[OK] API server is running at http://{HOST}:{PORT}{Colors.RESET}")
     print(f"{Colors.YELLOW}Send POST to /start to connect to the cloud game.{Colors.RESET}")
     print(f"{Colors.YELLOW}(Press CTRL+C to quit){Colors.RESET}")
     
@@ -1125,14 +1355,14 @@ async def run_server():
             except asyncio.CancelledError:
                 pass
         await runner.cleanup()
-        print(f"{Colors.GREEN}[✓] Server stopped.{Colors.RESET}")
+        print(f"{Colors.GREEN}[OK] Server stopped.{Colors.RESET}")
 
 def main():
     try:
         asyncio.run(run_server())
     except KeyboardInterrupt:
         # This handles Ctrl+C on Windows
-        print(f"\n{Colors.GREEN}[✓] Server stopped by user.{Colors.RESET}")
+        print(f"\n{Colors.GREEN}[OK] Server stopped by user.{Colors.RESET}")
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>网易云游戏 · MAA 远程控制台</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=4" />
 </head>
 <body>
   <header class="topbar">
@@ -19,34 +19,70 @@
     </div>
   </header>
 
-  <main class="app-col" id="appCol">
-    <!-- 收起/展开控制面板按钮(悬浮于控制行上方) -->
-    <button id="btnPanelToggle" class="panel-toggle" type="button" aria-expanded="true">收起面板 ▼</button>
-    <!-- 面板收起后, 底部悬浮的恢复按钮 -->
-    <button id="btnPanelRestore" class="panel-toggle-float" type="button" hidden>展开控制面板 ▲</button>
-
-    <!-- 顶部:实时游戏画面 -->
-    <section class="stage" id="stage" aria-label="实时游戏画面">
-      <div id="stageWrap" class="stage-wrap">
-        <img id="stageImg" alt="实时游戏画面" class="stage-img" />
-        <div id="stagePlaceholder" class="stage-placeholder">
-          <p id="placeholderText">尚未连接,点击「启动云游戏」开始。</p>
+  <!-- 左右分栏: 左侧(上=游戏画面 / 下=一键长草日志), 右侧=全部设置与工具 -->
+  <main class="app-main">
+    <div class="col-left">
+      <!-- 实时游戏画面 -->
+      <section class="stage" id="stage" aria-label="实时游戏画面">
+        <div id="stageWrap" class="stage-wrap">
+          <img id="stageImg" alt="实时游戏画面" class="stage-img" />
+          <div id="stagePlaceholder" class="stage-placeholder">
+            <p id="placeholderText">尚未连接,点击「启动云游戏」开始。</p>
+          </div>
+          <div id="swipeHint" class="swipe-hint" hidden></div>
         </div>
-        <div id="swipeHint" class="swipe-hint" hidden></div>
-      </div>
-      <p class="hint-text">单击=点击 · 按住拖拽=滑动 · 支持触屏拖拽</p>
-    </section>
+        <p class="hint-text">单击=点击 · 按住拖拽=滑动 · 支持触屏拖拽</p>
+      </section>
 
-    <!-- 底部:一键长草 + 小工具 -->
-    <section class="control-row" id="controlRow">
-      <!-- 一键长草 -->
+      <!-- 一键长草运行日志 -->
+      <section class="card log-card" aria-label="一键长草日志">
+        <div class="card-head">
+          <h2>一键长草日志</h2>
+          <span id="maaLogPath" class="log-path" title="日志已自动保存到该文件, 便于调试"></span>
+        </div>
+        <ol id="maaLogList" class="log-list maa-log-list" aria-live="polite"></ol>
+      </section>
+    </div>
+
+    <aside class="col-right">
+      <!-- 云游戏账号: 短信验证码 / 手机号密码登录(token 保存后启动云游戏自动使用) -->
+      <div class="card control-card">
+        <div class="card-head">
+          <h2>云游戏账号</h2>
+          <span id="loginStatus" class="maa-status" data-state="idle">未登录</span>
+        </div>
+        <div class="login-tabs" role="tablist">
+          <button id="tabLoginSms" class="login-tab is-active" type="button" role="tab">短信验证码</button>
+          <button id="tabLoginPwd" class="login-tab" type="button" role="tab">密码登录</button>
+        </div>
+        <div class="opt-row">
+          <label for="loginPhone">手机号</label>
+          <input id="loginPhone" type="tel" inputmode="numeric" maxlength="11"
+                 placeholder="11 位手机号" autocomplete="tel" />
+          <button id="btnLoginSms" class="btn btn-ghost" type="button">发送验证码</button>
+        </div>
+        <div class="opt-row" id="loginCodeRow">
+          <label for="loginCode">验证码</label>
+          <input id="loginCode" type="text" inputmode="numeric" maxlength="6"
+                 placeholder="短信验证码" autocomplete="one-time-code" />
+          <button id="btnLoginSubmit" class="btn btn-primary" type="button">登录</button>
+        </div>
+        <div class="opt-row" id="loginPwdRow" hidden>
+          <label for="loginPassword">密码</label>
+          <input id="loginPassword" type="password" maxlength="32"
+                 placeholder="账号密码" autocomplete="current-password" />
+          <button id="btnLoginPwdSubmit" class="btn btn-primary" type="button">登录</button>
+        </div>
+        <p class="tool-note" id="loginNote">登录成功后 token 自动保存, 启动云游戏时自动使用</p>
+      </div>
+
+      <!-- 一键长草: 任务开关 + 各任务设置 -->
       <div class="card control-card">
         <div class="card-head">
           <h2>一键长草</h2>
           <span id="maaStatus" class="maa-status">空闲</span>
         </div>
         <div class="task-grid">
-          <!-- 可启停的每日任务开关(库存保持已移除) -->
           <label class="task-toggle" data-task="awaken">
             <input type="checkbox" checked /><span>开始唤醒</span>
           </label>
@@ -66,6 +102,7 @@
             <input type="checkbox" checked /><span>领取奖励</span>
           </label>
         </div>
+
         <!-- 作战设置: 理智作战 + 每周剿灭(仅在勾选对应任务时启用) -->
         <fieldset class="fight-options" id="fightOptions">
           <legend>作战设置</legend>
@@ -98,16 +135,8 @@
           </div>
           <div class="opt-row">
             <label for="fightTimes">次数</label>
-            <input id="fightTimes" type="number" min="1" max="99" value="5" />
-            <label for="fightSeries">代理</label>
-            <select id="fightSeries">
-              <option value="0">AUTO</option>
-              <option value="1">1×</option>
-              <option value="2">2×</option>
-              <option value="3">3×</option>
-              <option value="4">4×</option>
-              <option value="5">5×</option>
-            </select>
+            <input id="fightTimes" type="text" inputmode="numeric" value="5"
+                   placeholder="数字或 auto" autocomplete="off" />
             <label for="medicineSel">理智药</label>
             <select id="medicineSel">
               <option value="off">关</option>
@@ -129,7 +158,7 @@
               <option value="4">4</option>
             </select>
           </div>
-          <p class="opt-note">理智药 AUTO=用完全部可用药; 剿灭 AUTO=连刷至本周合成玉满自动停; 合成玉已满时直接跳过</p>
+          <p class="opt-note">次数 AUTO=刷完当前理智自动停; 理智药 AUTO=用完全部可用药; 剿灭 AUTO=连刷至本周合成玉满自动停; 合成玉已满时直接跳过</p>
           <div class="opt-row">
             <label class="inline-check">
               <input type="checkbox" id="signinEnabled" checked /><span>运行前先云游戏签到</span>
@@ -137,6 +166,78 @@
             <span class="hint">领取网易云游戏每日奖励时长</span>
           </div>
         </fieldset>
+
+        <!-- 基建设置: 换班模式(常规/自定义基建/队列轮换) + 设施 + 无人机等 -->
+        <fieldset class="fight-options" id="infrastOptions">
+          <legend>基建设置</legend>
+          <div class="opt-row">
+            <label for="infrastMode">换班模式</label>
+            <select id="infrastMode">
+              <option value="0" selected>常规模式</option>
+              <option value="10000">自定义基建模式</option>
+              <option value="20000">队列轮换</option>
+            </select>
+          </div>
+          <!-- 自定义基建模式专属: 排班配置路径与方案序号 -->
+          <div class="opt-row" id="infrastCustomRow" hidden>
+            <label for="infrastFilename">排班配置</label>
+            <input id="infrastFilename" type="text"
+                   placeholder="resource/custom_infrast/243_layout_3_times_a_day.json"
+                   autocomplete="off" />
+            <label for="infrastPlanIndex">方案序号</label>
+            <input id="infrastPlanIndex" type="number" min="0" value="0" />
+          </div>
+          <p class="opt-note" id="infrastModeNote"></p>
+          <div class="opt-row">
+            <label for="infrastDrones">无人机用途</label>
+            <select id="infrastDrones">
+              <option value="_NotUse">不使用</option>
+              <option value="Money" selected>贸易站-龙门币</option>
+              <option value="SyntheticJade">贸易站-合成玉</option>
+              <option value="CombatRecord">制造站-经验书</option>
+              <option value="PureGold">制造站-赤金</option>
+              <option value="OriginStone">制造站-源石碎片</option>
+              <option value="Chip">制造站-芯片</option>
+            </select>
+            <label for="infrastThreshold">心情阈值</label>
+            <input id="infrastThreshold" type="number" min="0" max="1" step="0.05" value="0.3" />
+          </div>
+          <div class="facility-grid" id="infrastFacilities">
+            <label class="facility-item"><input type="checkbox" data-facility="Mfg" checked /><span>制造站</span></label>
+            <label class="facility-item"><input type="checkbox" data-facility="Trade" checked /><span>贸易站</span></label>
+            <label class="facility-item"><input type="checkbox" data-facility="Control" checked /><span>控制中心</span></label>
+            <label class="facility-item"><input type="checkbox" data-facility="Power" checked /><span>发电站</span></label>
+            <label class="facility-item"><input type="checkbox" data-facility="Reception" checked /><span>会客室</span></label>
+            <label class="facility-item"><input type="checkbox" data-facility="Office" checked /><span>办公室</span></label>
+            <label class="facility-item"><input type="checkbox" data-facility="Dorm" checked /><span>宿舍</span></label>
+            <label class="facility-item"><input type="checkbox" data-facility="Processing" checked /><span>加工站</span></label>
+            <label class="facility-item"><input type="checkbox" data-facility="Training" checked /><span>训练室</span></label>
+          </div>
+          <div class="opt-row">
+            <label class="inline-check">
+              <input type="checkbox" id="infrastReplenish" checked /><span>源石碎片自动补货</span>
+            </label>
+            <label class="inline-check">
+              <input type="checkbox" id="infrastDormTrust" checked /><span>宿舍信赖位</span>
+            </label>
+            <label class="inline-check">
+              <input type="checkbox" id="infrastDormNotStationed" /><span>宿舍未进驻</span>
+            </label>
+          </div>
+          <div class="opt-row">
+            <label class="inline-check">
+              <input type="checkbox" id="infrastReceptionBoard" checked /><span>会客室信息板</span>
+            </label>
+            <label class="inline-check">
+              <input type="checkbox" id="infrastReceptionExchange" checked /><span>线索交流</span>
+            </label>
+            <label class="inline-check">
+              <input type="checkbox" id="infrastReceptionSend" checked /><span>赠送线索</span>
+            </label>
+          </div>
+          <p class="opt-note">常规模式=自动排班; 自定义基建模式=读取排班配置; 队列轮换=跳过控制中枢/发电站/宿舍/办公室, 仅保留无人机与会客室逻辑</p>
+        </fieldset>
+
         <!-- 领取奖励细分项(勾选「领取奖励」后编辑) -->
         <fieldset class="fight-options" id="awardOptions">
           <legend>领取奖励选项</legend>
@@ -163,6 +264,7 @@
             </label>
           </div>
         </fieldset>
+
         <div class="control-actions">
           <button id="btnMaaRun" class="btn btn-primary" type="button">开始执行</button>
           <button id="btnMaaStop" class="btn btn-danger" type="button">停止</button>
@@ -176,16 +278,15 @@
             <input type="checkbox" id="dailyEnabled" /><span>启用</span>
           </label>
           <input id="dailyTime" type="time" value="08:00" />
+          <button id="btnDailyTest" class="btn btn-ghost" type="button"
+                  title="立即执行一次「启动云游戏 → 一键长草」, 不影响每日定时记录">测试执行</button>
           <span class="hint">到点自动:启动云游戏 → 一键长草(按上方勾选与设置)</span>
         </div>
         <p class="tool-note" id="dailyNote">—</p>
-        <hr class="section-divider" />
-        <h2>一键长草日志 <span id="maaLogPath" class="log-path" title="日志已自动保存到该文件, 便于调试"></span></h2>
-        <ol id="maaLogList" class="log-list maa-log-list" aria-live="polite"></ol>
         <p class="tool-note">全部设置即时自动保存(maa_settings.json); 日志自存 logs/maa_*.log</p>
       </div>
 
-      <!-- 小工具 + 连接信息 + 文本输入 + 日志 -->
+      <!-- 小工具 + 连接信息 + 文本输入 + 操作日志 -->
       <div class="card control-card">
         <div class="card-head"><h2>小工具</h2></div>
         <div class="tool-list">
@@ -214,9 +315,10 @@
         <h2>操作日志</h2>
         <ol id="logList" class="log-list" aria-live="polite"></ol>
       </div>
-    </section>
+    </aside>
   </main>
 
-  <script src="/static/app.js"></script>
+  <!-- v= 版本号用于强制刷新静态资源(避免改版后浏览器复用旧缓存) -->
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

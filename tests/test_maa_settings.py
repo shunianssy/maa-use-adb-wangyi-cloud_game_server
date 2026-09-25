@@ -22,7 +22,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.modules.pop("sdk", None)
 sys.modules.pop("sdk.signin", None)
 
-from maa_settings import MaaSettings, default_settings  # noqa: E402
+from maa_settings import (  # noqa: E402
+    INFRAST_FACILITIES,
+    MaaSettings,
+    default_settings,
+)
 from sdk import signin  # noqa: E402
 
 
@@ -44,6 +48,37 @@ class TestMaaSettings(unittest.TestCase):
         self.assertTrue(s["award"]["award"])
         self.assertTrue(s["award"]["mail"])
         self.assertTrue(s["award"]["orundum"])
+
+    def test_infrast_defaults(self):
+        # 基建设置默认: 常规模式 + 全设施 + 贸易站-龙门币 + 心情阈值 0.3
+        s = default_settings()
+        self.assertIn("infrast", s)
+        infra = s["infrast"]
+        self.assertEqual(infra["mode"], 0)
+        self.assertEqual(infra["facility"], list(INFRAST_FACILITIES))
+        self.assertEqual(infra["drones"], "Money")
+        self.assertEqual(infra["threshold"], 0.3)
+        self.assertTrue(infra["replenish"])
+        self.assertFalse(infra["dorm_notstationed_enabled"])
+        self.assertTrue(infra["dorm_trust_enabled"])
+        self.assertEqual(infra["filename"], "")
+        self.assertEqual(infra["plan_index"], 0)
+        # 默认值必须深拷贝: 修改返回值不能污染后续 default_settings()
+        infra["facility"].append("Bogus")
+        self.assertNotIn("Bogus", default_settings()["infrast"]["facility"])
+
+    def test_infrast_persisted(self):
+        # 基建设置需可落盘并重新载入(含设施列表整体替换)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "maa_settings.json")
+            ms = MaaSettings(path)
+            ms.update({"infrast": {"mode": 20000, "facility": ["Mfg", "Trade"],
+                                   "threshold": 0.5}})
+            data = MaaSettings(path).get()["infrast"]
+            self.assertEqual(data["mode"], 20000)
+            self.assertEqual(data["facility"], ["Mfg", "Trade"])
+            self.assertEqual(data["threshold"], 0.5)
+            self.assertEqual(data["drones"], "Money")   # 未覆盖字段保持默认
 
     def test_save_and_reload(self):
         with tempfile.TemporaryDirectory() as tmp:

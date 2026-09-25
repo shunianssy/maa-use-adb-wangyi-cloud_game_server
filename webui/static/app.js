@@ -3,6 +3,8 @@
  *  - 维护 WebSocket 连接(自动重连)并接收状态/帧/回执
  *  - 渲染实时画面, 处理「点击」与「拖拽滑动」并把坐标归一化为游戏分辨率
  *  - 文本输入、启动/断开连接、操作日志
+ *  - 云游戏账号登录(手机号 + 短信验证码, 登录成功后 token 由后端落盘)
+ *  - 一键长草设置(任务开关/作战/基建/领奖/每日定时)的收集、回填与自动保存
  */
 (function () {
   "use strict";
@@ -64,6 +66,16 @@
     const mm = String(m).padStart(2, "0");
     const rr = String(r).padStart(2, "0");
     return h > 0 ? `${h} 小时 ${mm}:${rr}` : `${mm}:${rr}`;
+  }
+
+  /* 解析理智作战次数: 输入 auto(不分大小写)表示刷完当前理智自动停;
+     其余解析为 1~999 的整数, 非法输入回落到默认 5 次 */
+  function parseFightTimes(raw) {
+    const text = String(raw == null ? "" : raw).trim().toLowerCase();
+    if (text === "auto") return "auto";
+    const num = parseInt(text, 10);
+    if (!Number.isFinite(num) || num < 1) return 5;
+    return Math.min(999, num);
   }
 
   /* ---------- WebSocket ---------- */
@@ -262,6 +274,12 @@
   const MAA_TASKS = [
     "awaken", "recruit", "infrast", "combat", "credit", "reward",
   ];
+  // 换班模式说明(MAA Infrast.mode: 0=常规 / 10000=自定义基建 / 20000=队列轮换)
+  const INFRAST_MODE_NOTES = {
+    "0": "常规模式: 自动计算效率较高的干员组合, 换班顺序由算法统一安排。",
+    "10000": "自定义基建模式: 读取排班配置中的方案, 需填写配置路径。",
+    "20000": "队列轮换: 跳过控制中枢/发电站/宿舍/办公室, 其余设施不换干员但保留无人机与会客室逻辑。",
+  };
   let maaPollTimer = null;
   let coordEnabled = false;
   let appSettings = null;       // 后端已保存的设置(启动时加载)
@@ -291,6 +309,11 @@
       log("fail", "请至少启用一个任务");
       return;
     }
+    // 基建换班需要至少一项设施, 否则 MAA 会直接报参数非法
+    if (tasks.includes("infrast") && !collectFacilities().length) {
+      log("fail", "基建设施至少需要勾选一项");
+      return;
+    }
     const options = collectRunOptions();
     saveSettings(null, { silent: true });   // 先落盘当前表单, 保证下次加载一致
     setMaaStatus("running");
@@ -313,7 +336,101 @@
     }
   }
 
-  /* 从表单收集本次运行的作战选项 fight/annihilation */
+  /* ---------- 基建设置 ---------- */
+
+  /* 收集勾选的基建设施(按 DOM 顺序, 与 MAA 自定义/轮换模式的执行顺序一致) */
+  function collectFacilities() {
+    const list = [];
+    if (!els.infrastFacilities) return list;
+    els.infrastFacilities.querySelectorAll("input[data-facility]").forEach((box) => {
+      if (box.checked) list.push(box.dataset.facility);
+    });
+    return list;
+  }
+
+  /* 回填基建设施勾选状态 */
+  function applyFacilities(facility) {
+    if (!els.infrastFacilities) return;
+    const picked = new Set(Array.isArray(facility) ? facility : []);
+    els.infrastFacilities.querySelectorAll("input[data-facility]").forEach((box) => {
+      box.checked = picked.has(box.dataset.facility);
+    });
+  }
+
+  /* 收集基建设置(随「开始执行」透传给后端, 并作为设置保存) */
+  function collectInfrast() {
+    const modeText = (els.infrastMode && els.infrastMode.value) || "0";
+    const threshold = Number(els.infrastThreshold && els.infrastThreshold.value);
+    return {
+      mode: Number(modeText) || 0,
+      facility: collectFacilities(),
+      drones: (els.infrastDrones && els.infrastDrones.value) || "Money",
+      threshold: Number.isFinite(threshold) ? threshold : 0.3,
+      replenish: !!(els.infrastReplenish && els.infrastReplenish.checked),
+      dorm_notstationed_enabled: !!(els.infrastDormNotStationed && els.infrastDormNotStationed.checked),
+      dorm_trust_enabled: !!(els.infrastDormTrust && els.infrastDormTrust.checked),
+      reception_message_board: !!(els.infrastReceptionBoard && els.infrastReceptionBoard.checked),
+      reception_clue_exchange: !!(els.infrastReceptionExchange && els.infrastReceptionExchange.checked),
+      reception_send_clue: !!(els.infrastReceptionSend && els.infrastReceptionSend.checked),
+      filename: (els.infrastFilename && els.infrastFilename.value.trim()) || "",
+      plan_index: Number((els.infrastPlanIndex && els.infrastPlanIndex.value) || 0),
+    };
+  }
+
+  /* 回填已保存的基建设置 */
+  function applyInfrast(infra) {
+    const i = infra || {};
+    if (els.infrastMode) els.infrastMode.value = String(i.mode != null ? i.mode : 0);
+    applyFacilities(i.facility);
+    if (els.infrastDrones) els.infrastDrones.value = i.drones || "Money";
+    if (els.infrastThreshold) {
+      els.infrastThreshold.value = i.threshold != null ? i.threshold : 0.3;
+    }
+    if (els.infrastReplenish) els.infrastReplenish.checked = i.replenish !== false;
+    if (els.infrastDormNotStationed) {
+      els.infrastDormNotStationed.checked = !!i.dorm_notstationed_enabled;
+    }
+    if (els.infrastDormTrust) els.infrastDormTrust.checked = i.dorm_trust_enabled !== false;
+    if (els.infrastReceptionBoard) {
+      els.infrastReceptionBoard.checked = i.reception_message_board !== false;
+    }
+    if (els.infrastReceptionExchange) {
+      els.infrastReceptionExchange.checked = i.reception_clue_exchange !== false;
+    }
+    if (els.infrastReceptionSend) {
+      els.infrastReceptionSend.checked = i.reception_send_clue !== false;
+    }
+    if (els.infrastFilename) els.infrastFilename.value = i.filename || "";
+    if (els.infrastPlanIndex) {
+      els.infrastPlanIndex.value = i.plan_index != null ? i.plan_index : 0;
+    }
+  }
+
+  /* 基建设置联动: 任务开关控制可编辑性; 模式决定配置行显隐与不可用项置灰 */
+  function syncInfrastStates() {
+    const on = !!(els.taskToggle && els.taskToggle.infrast &&
+      els.taskToggle.infrast.checked);
+    if (els.infrastOptions) {
+      els.infrastOptions.querySelectorAll("input,select").forEach((el) => {
+        el.disabled = !on;
+      });
+    }
+    const mode = (els.infrastMode && els.infrastMode.value) || "0";
+    // 自定义基建模式才需要排班配置路径与方案序号
+    const custom = mode === "10000";
+    [els.infrastFilename, els.infrastPlanIndex].forEach((el) => {
+      if (el) el.disabled = !on || !custom;
+    });
+    // 队列轮换模式下无人机与心情阈值不生效(官方标注为无效字段)
+    const rotation = mode === "20000";
+    [els.infrastDrones, els.infrastThreshold].forEach((el) => {
+      if (el) el.disabled = !on || rotation;
+    });
+    if (els.infrastCustomRow) els.infrastCustomRow.hidden = !custom;
+    if (els.infrastModeNote) els.infrastModeNote.textContent = INFRAST_MODE_NOTES[mode] || "";
+  }
+
+  /* 从表单收集本次运行的选项 fight/annihilation/infrast/award/signin */
   function collectRunOptions() {
     const medSel = (els.medicineSel && els.medicineSel.value) || "auto";
     let medicine = 0, medicineMode = "off";
@@ -324,8 +441,8 @@
     return {
       fight: {
         stage: (els.fightStage && els.fightStage.value.trim()) || "",
-        times: Number(els.fightTimes && els.fightTimes.value) || 5,
-        series: Number(els.fightSeries && els.fightSeries.value) || 0,
+        // 次数支持 "auto"(刷完当前理智自动停); 代理倍率恒为 AUTO, 无需前端配置
+        times: parseFightTimes(els.fightTimes && els.fightTimes.value),
         medicine_mode: medicineMode,
         medicine: medicine,
       },
@@ -333,6 +450,7 @@
         auto: anniAuto,
         times: anniAuto ? 999 : Number(els.annihilationAuto && els.annihilationAuto.value) || 4,
       },
+      infrast: collectInfrast(),
       signin: { enabled: !!(els.signinEnabled && els.signinEnabled.checked) },
       award: {
         award: !!(els.awardAward && els.awardAward.checked),
@@ -345,7 +463,7 @@
     };
   }
 
-  /* 收集设置 patch: tasks 开关 / fight / annihilation / signin / daily */
+  /* 收集设置 patch: tasks 开关 / fight / annihilation / infrast / signin / award / daily */
   function collectSettingsPatch() {
     const opts = collectRunOptions();
     const tasks = {};
@@ -360,6 +478,7 @@
         auto: opts.annihilation.auto,
         times: opts.annihilation.auto ? 4 : (opts.annihilation.times || 4),
       },
+      infrast: opts.infrast,
       signin: opts.signin,
       award: opts.award,
       daily: {
@@ -381,7 +500,6 @@
     const f = s.fight || {};
     if (els.fightStage) els.fightStage.value = f.stage || "";
     if (els.fightTimes) els.fightTimes.value = f.times != null ? f.times : 5;
-    if (els.fightSeries) els.fightSeries.value = f.series != null ? f.series : 0;
     // 理智药: mode 映射到下拉(兼容旧 medicine_enabled 字段)
     const mMode = f.medicine_mode != null ? f.medicine_mode
       : (f.medicine_enabled ? "num" : "off");
@@ -395,6 +513,8 @@
       els.annihilationAuto.value = a.auto !== false ? "auto" : String(a.times != null ? a.times : 4);
     }
     if (els.signinEnabled) els.signinEnabled.checked = !!((s.signin || {}).enabled);
+    // 基建设置(换班模式/设施/无人机/阈值等)
+    applyInfrast(s.infrast);
     // 领取奖励细分项
     const aw = s.award || {};
     [["awardAward", "award"], ["awardMail", "mail"], ["awardRecruit", "recruit"],
@@ -433,6 +553,8 @@
         el.disabled = !rewardOn;
       });
     }
+    // 基建设置: 依赖「基建换班」开关与换班模式
+    syncInfrastStates();
   }
 
   /* 设置自动保存(防抖 800ms), patch 为空时保存全部表单 */
@@ -479,6 +601,23 @@
       }
     } catch (e) {
       log("fail", `签到请求失败: ${e.message}`);
+    }
+  }
+
+  /* 「测试执行」: 立即跑一次 启动云游戏 → 一键长草(不影响每日定时记录) */
+  async function doMaaDailyTest() {
+    log("sys", "发起测试执行(启动云游戏 → 一键长草)…");
+    try {
+      const resp = await fetch("/maa/daily/test", { method: "POST" });
+      const data = await resp.json().catch(() => null);
+      if (data && data.status === "ok") {
+        log("ok", data.message || "测试执行已开始");
+        setMaaStatus("running");
+      } else {
+        log("fail", (data && data.message) || `测试执行失败(HTTP ${resp.status})`);
+      }
+    } catch (e) {
+      log("fail", `测试执行请求失败: ${e.message}`);
     }
   }
 
@@ -542,17 +681,6 @@
     els.maaLogList.scrollTop = els.maaLogList.scrollHeight;
   }
 
-  /* 收起/展开底部控制面板, 释放画布空间给游戏画面 */
-  function setPanelCollapsed(collapsed) {
-    if (!els.appCol || !els.controlRow || !els.stage) return;
-    els.appCol.classList.toggle("panel-collapsed", collapsed);
-    els.controlRow.classList.toggle("control-hidden", collapsed);
-    els.stage.classList.toggle("stage-full", collapsed);
-    els.btnPanelToggle.hidden = collapsed;
-    els.btnPanelRestore.hidden = !collapsed;
-    els.btnPanelToggle.setAttribute("aria-expanded", String(!collapsed));
-  }
-
   async function pollMaaStatus() {
     try {
       const resp = await fetch("/maa/status");
@@ -584,6 +712,180 @@
       }
     } catch (e) {
       // 服务未就绪时静默, 下次轮询再试
+    }
+  }
+
+  /* ---------- 云游戏账号登录(手机号 + 短信验证码) ---------- */
+  const PHONE_STORAGE_KEY = "netease_login_phone";  // 仅记住手机号, 便于下次登录
+  let smsCountdownTimer = null;
+
+  function setLoginStatus(state, text) {
+    if (!els.loginStatus) return;
+    els.loginStatus.dataset.state = state;
+    els.loginStatus.textContent = text;
+  }
+
+  function setLoginNote(text) {
+    if (els.loginNote) els.loginNote.textContent = text;
+  }
+
+  /* 切换登录方式: sms=短信验证码 / pwd=手机号密码 */
+  function setLoginMode(mode) {
+    const pwdMode = mode === "pwd";
+    if (els.tabLoginSms) els.tabLoginSms.classList.toggle("is-active", !pwdMode);
+    if (els.tabLoginPwd) els.tabLoginPwd.classList.toggle("is-active", pwdMode);
+    if (els.loginCodeRow) els.loginCodeRow.hidden = pwdMode;
+    if (els.loginPwdRow) els.loginPwdRow.hidden = !pwdMode;
+    if (els.btnLoginSms) els.btnLoginSms.hidden = pwdMode;
+    setLoginNote(pwdMode
+      ? "密码登录需当前 token 有效; 若已失效请改用短信验证码登录"
+      : "登录成功后 token 自动保存, 启动云游戏时自动使用");
+  }
+
+  /* 查询登录状态(带剩余时长): 页面加载与登录成功后各调用一次 */
+  async function loadLoginStatus() {
+    if (!els.loginStatus) return;
+    try {
+      const resp = await fetch("/api/login/status?remaining=1");
+      const data = await resp.json();
+      if (data && data.logged_in) {
+        // 存在 token 文件即视为已登录(可免短信/密码直接启动云游戏与签到)
+        setLoginStatus("done", "已登录");
+        setLoginNote(data.remaining_time != null
+          ? `已登录, 云游戏剩余时长 ${formatRemaining(data.remaining_time)}`
+          : "已登录(未取到剩余时长, 可点「断开连接」后重试)");
+      } else {
+        setLoginStatus("idle", "未登录");
+        setLoginNote("登录成功后 token 自动保存, 启动云游戏时自动使用");
+      }
+    } catch (e) {
+      // 服务未就绪时静默, 由轮询/下次操作再刷新
+    }
+  }
+
+  /* 发送验证码成功后进入 60 秒倒计时, 避免重复点击触发风控 */
+  function startSmsCountdown(seconds) {
+    const btn = els.btnLoginSms;
+    if (!btn) return;
+    let left = seconds || 60;
+    btn.disabled = true;
+    btn.textContent = `${left}s 后重发`;
+    clearInterval(smsCountdownTimer);
+    smsCountdownTimer = setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        clearInterval(smsCountdownTimer);
+        smsCountdownTimer = null;
+        btn.disabled = false;
+        btn.textContent = "发送验证码";
+        return;
+      }
+      btn.textContent = `${left}s 后重发`;
+    }, 1000);
+  }
+
+  async function doSendLoginSms() {
+    const phone = (els.loginPhone && els.loginPhone.value.trim()) || "";
+    if (!/^1\d{10}$/.test(phone)) {
+      log("fail", "请输入 11 位手机号");
+      return;
+    }
+    els.btnLoginSms.disabled = true;
+    try {
+      const resp = await fetch("/api/login/sms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const data = await resp.json().catch(() => null);
+      if (data && data.status === "ok") {
+        log("ok", data.message || "验证码已发送");
+        setLoginNote("验证码已发送, 请输入短信验证码后点「登录」");
+        startSmsCountdown(60);
+      } else {
+        els.btnLoginSms.disabled = false;
+        log("fail", (data && data.message) || `发送验证码失败(HTTP ${resp.status})`);
+      }
+    } catch (e) {
+      els.btnLoginSms.disabled = false;
+      log("fail", `发送验证码失败: ${e.message}`);
+    }
+  }
+
+  async function doLoginSubmit() {
+    const phone = (els.loginPhone && els.loginPhone.value.trim()) || "";
+    const code = (els.loginCode && els.loginCode.value.trim()) || "";
+    if (!/^1\d{10}$/.test(phone)) {
+      log("fail", "请输入 11 位手机号");
+      return;
+    }
+    if (!code) {
+      log("fail", "请输入短信验证码");
+      return;
+    }
+    els.btnLoginSubmit.disabled = true;
+    setLoginStatus("running", "登录中…");
+    try {
+      const resp = await fetch("/api/login/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, code }),
+      });
+      const data = await resp.json().catch(() => null);
+      if (data && data.status === "ok") {
+        log("ok", data.message || "登录成功");
+        try { localStorage.setItem(PHONE_STORAGE_KEY, phone); } catch (e) { /* 隐私模式忽略 */ }
+        if (els.loginCode) els.loginCode.value = "";
+        setLoginNote(data.message || "登录成功");
+        loadLoginStatus();   // 刷新剩余时长与徽标
+      } else {
+        setLoginStatus("idle", "未登录");
+        log("fail", (data && data.message) || `登录失败(HTTP ${resp.status})`);
+      }
+    } catch (e) {
+      setLoginStatus("idle", "未登录");
+      log("fail", `登录请求失败: ${e.message}`);
+    } finally {
+      els.btnLoginSubmit.disabled = false;
+    }
+  }
+
+  /* 密码登录: POST /api/login/password(需当前 token 有效以获取加密参数) */
+  async function doLoginPassword() {
+    const phone = (els.loginPhone && els.loginPhone.value.trim()) || "";
+    const password = (els.loginPassword && els.loginPassword.value) || "";
+    if (!/^1\d{10}$/.test(phone)) {
+      log("fail", "请输入 11 位手机号");
+      return;
+    }
+    if (!password) {
+      log("fail", "请输入账号密码");
+      return;
+    }
+    els.btnLoginPwdSubmit.disabled = true;
+    setLoginStatus("running", "登录中…");
+    try {
+      const resp = await fetch("/api/login/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, password }),
+      });
+      const data = await resp.json().catch(() => null);
+      if (data && data.status === "ok") {
+        log("ok", data.message || "登录成功");
+        try { localStorage.setItem(PHONE_STORAGE_KEY, phone); } catch (e) { /* 隐私模式忽略 */ }
+        if (els.loginPassword) els.loginPassword.value = "";
+        setLoginNote(data.message || "登录成功");
+        loadLoginStatus();   // 刷新剩余时长与徽标
+      } else {
+        setLoginStatus("idle", "未登录");
+        log("fail", (data && data.message) || `密码登录失败(HTTP ${resp.status})`);
+      }
+    } catch (e) {
+      setLoginStatus("idle", "未登录");
+      log("fail", `密码登录请求失败: ${e.message}`);
+    } finally {
+      els.btnLoginPwdSubmit.disabled = false;
     }
   }
 
@@ -629,7 +931,6 @@
     els.fightOptions = $("fightOptions");
     els.fightStage = $("fightStage");
     els.fightTimes = $("fightTimes");
-    els.fightSeries = $("fightSeries");
     els.medicineSel = $("medicineSel");
     els.annihilationEnabled = $("annihilationEnabled");
     els.annihilationAuto = $("annihilationAuto");
@@ -641,12 +942,66 @@
     els.awardOptions = $("awardOptions");
     ["awardAward", "awardMail", "awardRecruit", "awardOrundum",
      "awardMining", "awardSpecial"].forEach((id) => { els[id] = $(id); });
+    // 基建设置控件
+    els.infrastOptions = $("infrastOptions");
+    els.infrastMode = $("infrastMode");
+    els.infrastCustomRow = $("infrastCustomRow");
+    els.infrastFilename = $("infrastFilename");
+    els.infrastPlanIndex = $("infrastPlanIndex");
+    els.infrastModeNote = $("infrastModeNote");
+    els.infrastFacilities = $("infrastFacilities");
+    els.infrastDrones = $("infrastDrones");
+    els.infrastThreshold = $("infrastThreshold");
+    els.infrastReplenish = $("infrastReplenish");
+    els.infrastDormTrust = $("infrastDormTrust");
+    els.infrastDormNotStationed = $("infrastDormNotStationed");
+    els.infrastReceptionBoard = $("infrastReceptionBoard");
+    els.infrastReceptionExchange = $("infrastReceptionExchange");
+    els.infrastReceptionSend = $("infrastReceptionSend");
+    // 云游戏账号登录控件
+    els.loginStatus = $("loginStatus");
+    els.loginNote = $("loginNote");
+    els.loginPhone = $("loginPhone");
+    els.loginCode = $("loginCode");
+    els.loginCodeRow = $("loginCodeRow");
+    els.loginPwdRow = $("loginPwdRow");
+    els.loginPassword = $("loginPassword");
+    els.btnLoginSms = $("btnLoginSms");
+    els.btnLoginSubmit = $("btnLoginSubmit");
+    els.btnLoginPwdSubmit = $("btnLoginPwdSubmit");
+    els.tabLoginSms = $("tabLoginSms");
+    els.tabLoginPwd = $("tabLoginPwd");
+    if (els.btnLoginSms) els.btnLoginSms.addEventListener("click", doSendLoginSms);
+    if (els.btnLoginSubmit) els.btnLoginSubmit.addEventListener("click", doLoginSubmit);
+    if (els.btnLoginPwdSubmit) els.btnLoginPwdSubmit.addEventListener("click", doLoginPassword);
+    if (els.tabLoginSms) els.tabLoginSms.addEventListener("click", () => setLoginMode("sms"));
+    if (els.tabLoginPwd) els.tabLoginPwd.addEventListener("click", () => setLoginMode("pwd"));
+    if (els.loginCode) {
+      // 验证码输入框回车即提交登录
+      els.loginCode.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); doLoginSubmit(); }
+      });
+    }
+    if (els.loginPassword) {
+      // 密码输入框回车即提交登录
+      els.loginPassword.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); doLoginPassword(); }
+      });
+    }
+    // 每日定时「测试执行」
+    els.btnDailyTest = $("btnDailyTest");
+    if (els.btnDailyTest) els.btnDailyTest.addEventListener("click", doMaaDailyTest);
     // 表单改动 → 联动 + 自动保存
     const formEls = [
-      "fightStage", "fightTimes", "fightSeries", "medicineSel",
+      "fightStage", "fightTimes", "medicineSel",
       "annihilationEnabled", "annihilationAuto", "signinEnabled",
       "awardAward", "awardMail", "awardRecruit", "awardOrundum",
       "awardMining", "awardSpecial",
+      "infrastMode", "infrastFilename", "infrastPlanIndex",
+      "infrastDrones", "infrastThreshold", "infrastReplenish",
+      "infrastDormTrust", "infrastDormNotStationed",
+      "infrastReceptionBoard", "infrastReceptionExchange",
+      "infrastReceptionSend",
       "dailyEnabled", "dailyTime",
     ];
     formEls.forEach((id) => {
@@ -657,6 +1012,12 @@
         saveSettings();
       });
     });
+    // 基建设施勾选: 直接触发保存(顺序即 MAA 执行顺序, 故不做排序)
+    if (els.infrastFacilities) {
+      els.infrastFacilities.querySelectorAll("input[data-facility]").forEach((box) => {
+        box.addEventListener("change", () => saveSettings());
+      });
+    }
     // 任务开关: 勾选即保存(含表单联动)
     Object.keys(els.taskToggle).forEach((t) => {
       els.taskToggle[t].addEventListener("change", () => {
@@ -672,16 +1033,6 @@
     els.btnMaaSignin.addEventListener("click", doMaaSignin);
     els.btnScreencap.addEventListener("click", doScreencap);
     els.btnCoord.addEventListener("click", doToggleCoord);
-    // 收起/展开控制面板
-    els.appCol = $("appCol");
-    els.controlRow = $("controlRow");
-    els.btnPanelToggle = $("btnPanelToggle");
-    els.btnPanelRestore = $("btnPanelRestore");
-    els.stage = $("stage");
-    els.btnPanelToggle.addEventListener("click", () => setPanelCollapsed(true));
-    els.btnPanelRestore.addEventListener("click", () => setPanelCollapsed(false));
-    // 默认: 控制面板展开
-    setPanelCollapsed(false);
     // 启动任务状态轮询
     maaPollTimer = setInterval(pollMaaStatus, 2000);
 
@@ -724,6 +1075,13 @@
     els.btnExit.disabled = true;
     syncFormStates();
     loadSettings();   // 恢复已保存的设置(异步, 服务未就绪时保持默认)
+    // 回填上次登录使用的手机号(仅存于本机浏览器), 并刷新登录状态
+    try {
+      const savedPhone = localStorage.getItem(PHONE_STORAGE_KEY);
+      if (savedPhone && els.loginPhone) els.loginPhone.value = savedPhone;
+    } catch (e) { /* 隐私模式忽略 */ }
+    setLoginMode("sms");   // 默认短信验证码登录, 可切换到密码登录
+    loadLoginStatus();
     connect();
   }
 

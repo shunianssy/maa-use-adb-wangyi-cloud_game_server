@@ -2,15 +2,14 @@
   "tasks": {
     "awaken": true,
     "recruit": false,
-    "infrast": true,
+    "infrast": false,
     "combat": true,
-    "credit": true,
-    "reward": true
+    "credit": false,
+    "reward": false
   },
   "fight": {
     "stage": "1-7",
-    "times": 5,
-    "series": 0,
+    "times": "auto",
     "medicine_mode": "auto",
     "medicine": 999
   },
@@ -19,8 +18,36 @@
     "auto": true,
     "times": 4
   },
+  "infrast": {
+    "mode": 20000,
+    "facility": [
+      "Mfg",
+      "Trade",
+      "Reception",
+      "Office",
+      "Dorm"
+    ],
+    "drones": "Money",
+    "threshold": 0.3,
+    "replenish": true,
+    "dorm_notstationed_enabled": false,
+    "dorm_trust_enabled": true,
+    "reception_message_board": true,
+    "reception_clue_exchange": true,
+    "reception_send_clue": true,
+    "filename": "",
+    "plan_index": 0
+  },
   "signin": {
     "enabled": true
+  },
+  "award": {
+    "award": true,
+    "mail": true,
+    "recruit": true,
+    "orundum": true,
+    "mining": true,
+    "specialaccess": true
   },
   "daily": {
     "enabled": false,

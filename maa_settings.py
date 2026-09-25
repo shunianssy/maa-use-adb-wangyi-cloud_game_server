@@ -9,10 +9,16 @@
 {
   "tasks": {"awaken": true, "combat": true, ...},   # 任务开关
   "fight": {                                        # 理智作战
-      "stage": "1-7", "times": 5, "series": 0,
-      "medicine_enabled": false, "medicine": 0
+      "stage": "1-7",                               # 关卡, 留空=识别当前/上次
+      "times": 5,                                   # 战斗次数: 正整数 或 "auto"(刷完理智自动停)
+      "medicine_mode": "auto", "medicine": 0        # 理智药: off/auto/num
   },
   "annihilation": {"enabled": false, "times": 1},   # 每周剿灭
+  "infrast": {                                      # 基建换班
+      "mode": 0,                                    # 0=常规 / 10000=自定义 / 20000=队列轮换
+      "facility": ["Mfg", "Trade", ...],            # 参与换班的设施
+      "drones": "Money", "threshold": 0.3, ...
+  },
   "daily": {"enabled": false, "time": "08:00"},     # 每日定时执行
   "last_daily_run": ""                              # 上次定时执行日期(YYYY-MM-DD)
 }
@@ -26,6 +32,23 @@ from typing import Dict
 
 logger = logging.getLogger("maa_settings")
 
+# 基建换班: 换班模式取值(对齐官方集成文档 Infrast.mode)
+INFRAST_MODE_DEFAULT = 0        # Default: 自动计算效率较高的干员组合
+INFRAST_MODE_CUSTOM = 10000     # Custom: 读取自定义排班配置
+INFRAST_MODE_ROTATION = 20000   # Rotation: 队列轮换(跳过中枢/发电站/宿舍/办公室)
+
+# 基建换班: 合法设施名(对齐官方集成文档 Infrast.facility)
+INFRAST_FACILITIES = [
+    "Mfg", "Trade", "Control", "Power", "Reception",
+    "Office", "Dorm", "Processing", "Training",
+]
+
+# 基建换班: 合法无人机用途(对齐官方集成文档 Infrast.drones)
+INFRAST_DRONES = [
+    "_NotUse", "Money", "SyntheticJade", "CombatRecord",
+    "PureGold", "OriginStone", "Chip",
+]
+
 # 默认设置(前端缺省值也以此为准, 两端字段保持一致)
 DEFAULT_SETTINGS: Dict = {
     "tasks": {
@@ -38,8 +61,8 @@ DEFAULT_SETTINGS: Dict = {
     },
     "fight": {
         "stage": "",            # 关卡, 留空=识别当前/上次
-        "times": 5,             # 战斗次数
-        "series": 0,            # 代理倍率: -1禁用 / 0 AUTO / 1..10 指定
+        # 战斗次数: 正整数 或 "auto"(刷完当前理智自动停, 由 MAA 自行结束)
+        "times": 5,
         "medicine_mode": "auto",   # 理智药: "off"关闭 / "auto"全部使用 / "num"指定数量
         "medicine": 3,          # medicine_mode="num" 时的理智药数量
     },
@@ -47,6 +70,22 @@ DEFAULT_SETTINGS: Dict = {
         "enabled": True,        # 每周剿灭默认纳入日常(合成玉已满时 MAA 自动跳过)
         "auto": True,           # True=打满本周合成玉即止(AUTO); False=固定 times 场次
         "times": 4,             # auto=False 时的固定场次
+    },
+    "infrast": {
+        # 换班模式: 0=常规模式 / 10000=自定义基建模式 / 20000=队列轮换
+        "mode": INFRAST_MODE_DEFAULT,
+        # 参与换班的设施(缺省与 MAA「常规设置」默认全选一致)
+        "facility": list(INFRAST_FACILITIES),
+        "drones": "Money",      # 无人机用途: 贸易站-龙门币
+        "threshold": 0.3,       # 工作心情阈值 [0, 1.0]
+        "replenish": True,      # 贸易站「源石碎片」自动补货
+        "dorm_notstationed_enabled": False,  # 宿舍「未进驻」选项
+        "dorm_trust_enabled": True,          # 宿舍空位填入信赖未满干员
+        "reception_message_board": True,     # 领取会客室信息板信用
+        "reception_clue_exchange": True,     # 线索交流
+        "reception_send_clue": True,         # 赠送线索
+        "filename": "",         # 自定义排班配置路径(仅 mode=10000 生效)
+        "plan_index": 0,        # 使用配置中的方案序号(仅 mode=10000 生效)
     },
     "signin": {
         "enabled": True,        # 一键长草运行前先执行网易云游戏签到

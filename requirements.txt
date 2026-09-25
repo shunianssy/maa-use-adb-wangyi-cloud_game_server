@@ -5,3 +5,6 @@
 # MaaFw 为 MaaFramework 的官方 Python 绑定, 安装包自带 libMaaFramework 运行时库
 numpy>=1.26.0
 MaaFw>=5.13.1
+
+# 密码登录的 3DES 加密依赖(aiortc 已间接引入, 这里显式声明)
+cryptography>=41.0.0
