@@ -68,6 +68,37 @@ TASK_EXEC_ORDER = [
     "credit", "inventory",
 ]
 
+# 任务 key -> 中文展示名(日志/状态栏使用)
+# 说明: 理智作战与每周剿灭在 MaaCore 侧都是 Fight 类型, 只看类型名无法区分
+#       来源(容易误以为"没勾理智作战却在跑 Fight"), 因此日志统一展示
+#       "中文名(MaaCore 类型)" 形式。
+TASK_DISPLAY_NAMES = {
+    "awaken": "开始唤醒",
+    "recruit": "自动公招",
+    "infrast": "基建换班",
+    "combat": "理智作战",
+    "annihilation": "每周剿灭",
+    "inventory": "库存保持",
+    "credit": "信用收支",
+    "reward": "领取奖励",
+}
+
+
+def task_display_name(task_key: str, task_type: str = "") -> str:
+    """返回任务的可读展示名, 形如 "每周剿灭(Fight)"。
+
+    Args:
+        task_key: 前端任务 key(如 annihilation)
+        task_type: MaaCore 任务类型(如 Fight), 为空时只返回中文名
+
+    Returns:
+        中文名(MaaCore 类型); 未收录的 key 回退为 key 或类型名。
+    """
+    name = TASK_DISPLAY_NAMES.get(task_key)
+    if name and task_type:
+        return f"{name}({task_type})"
+    return name or task_type or task_key
+
 
 def _resolve_medicine(fight_opt: dict) -> int:
     """从作战设置解析理智药数量, 返回传入 Fight 的 medicine 值。
@@ -333,14 +364,20 @@ class TaskStatus:
         self._log_file = None            # 打开的日志文件句柄(整个运行周期保持)
 
     # ---- 写(协调器线程) ----
-    def start_run(self, tasks: List[str]) -> None:
+    def start_run(self, tasks: List[str], labels: Optional[List[str]] = None) -> None:
+        """开始一轮运行: 复位状态并打开日志文件。
+
+        Args:
+            tasks: 任务 key 列表(用于总进度与状态快照)
+            labels: 可选的可读展示名列表(与 tasks 一一对应, 仅用于日志展示)
+        """
         with self._lock:
             self._state = self.RUNNING
             self._current = ""
             self._finished = []
             self._total = list(tasks)
             self._error = ""
-            self._log = ["开始执行, 任务序列: " + ", ".join(tasks)]
+            self._log = ["开始执行, 任务序列: " + ", ".join(labels or tasks)]
             self._open_log_file()
 
     def _open_log_file(self) -> None:
@@ -456,6 +493,10 @@ class MaaCoordinator:
         self._token: Optional[str] = None  # 签到时使用的云游戏登录 token
         self.status = TaskStatus()
 
+        # 当前执行中的任务(key 与 MaaCore 类型), 供回调把任务链名映射为可读名称
+        self._current_key: str = ""
+        self._current_type: str = ""
+
         # 子任务错误跟踪(每次任务开始前复位):
         # 回调在 MaaCore 线程写入, 计数用锁保护; 超限仅置标志,
         # 真正的停止由等待循环执行(不在回调内调用核心接口, 避免重入死锁)。
@@ -515,9 +556,11 @@ class MaaCoordinator:
         进度与错误通过 self.status 上报给 WebUI 轮询; 全部日志自动落盘到
         logs/maa_*.log(由 TaskStatus.start_run 打开)。
         """
-        self.status.start_run(tasks)
+        self.status.start_run(
+            tasks, [task_display_name(t, DEFAULT_TASK_MAP.get(t, t)) for t in tasks])
         try:
-            logger.info("启动 MAA 一键长草, 任务序列: %s", ", ".join(tasks))
+            logger.info("启动 MAA 一键长草, 任务序列: %s",
+                        ", ".join(task_display_name(t, DEFAULT_TASK_MAP.get(t, t)) for t in tasks))
             self.status.log("正在初始化 MaaCore 引擎...")
 
             # 0) 可选前置: 网易云游戏签到(平台奖励; 失败不阻断后续任务)
@@ -547,28 +590,34 @@ class MaaCoordinator:
             skipped: List[str] = []
             for task in tasks:
                 task_type = DEFAULT_TASK_MAP.get(task, task)
+                label = task_display_name(task, task_type)
                 params = build_task_params(task, task_type, self._options)
-                logger.info("[一键长草] 追加任务 %s(%s) params=%s", task_type, task, params)
+                logger.info("[一键长草] 追加任务 %s params=%s", label, params)
+
+                # 记录当前任务来源, 供回调日志区分"理智作战/每周剿灭"等同类型任务
+                self._current_key, self._current_type = task, task_type
+                if task == "annihilation":
+                    self.status.log("每周剿灭: 本周合成玉已达上限时 MAA 会直接跳过(不进关卡属正常)")
 
                 try:
                     tid = assist.append_task(task_type, params)
                 except Exception as e:
                     # 单个任务参数/类型不被接受时不整体中断, 记录后继续后续任务
-                    logger.error("[一键长草] 追加任务 %s 失败(跳过): %s", task_type, e)
-                    self.status.log(f"追加任务 {task_type} 失败, 已跳过: {e}")
-                    self.status.mark_done(task, False, str(e))
+                    logger.error("[一键长草] 追加任务 %s 失败(跳过): %s", label, e)
+                    self.status.log(f"追加任务 {label} 失败, 已跳过: {e}")
+                    self.status.mark_done(task, False, f"{label} 追加失败: {e}")
                     continue
-                self.status.log(f"追加任务成功: {task_type} (task_id={tid})")
+                self.status.log(f"追加任务成功: {label} (task_id={tid})")
 
                 # 每次任务开始前复位错误跟踪(仅统计当前任务内的子任务出错)
                 self._reset_error_tracking()
-                self.status.set_current(task_type)
+                self.status.set_current(label)
                 try:
                     assist.start()
                 except Exception as e:
-                    logger.error("[一键长草] 启动任务 %s 失败(跳过): %s", task_type, e)
-                    self.status.log(f"启动任务 {task_type} 失败, 已跳过: {e}")
-                    self.status.mark_done(task, False, str(e))
+                    logger.error("[一键长草] 启动任务 %s 失败(跳过): %s", label, e)
+                    self.status.log(f"启动任务 {label} 失败, 已跳过: {e}")
+                    self.status.mark_done(task, False, f"{label} 启动失败: {e}")
                     continue
 
                 outcome = self._wait_task(assist)
@@ -676,6 +725,8 @@ class MaaCoordinator:
         taskchain = details.get("taskchain", "")
         what = details.get("what", "")
         why = details.get("why", "")
+        subtask = details.get("subtask", "")
+        chain = self._label_chain(taskchain)   # "每周剿灭(Fight)" 这类可读名称
 
         # ---- 全局信息 ----
         if msg_id == 2 and what:  # ConnectionInfo(连接阶段信息/错误)
@@ -691,37 +742,53 @@ class MaaCoordinator:
             self.status.log("[MaaCore] 全部任务完成")
         # ---- 任务链信息 ----
         elif msg_id == 10000:  # TaskChainError
-            logger.error("[MaaCore] 任务链出错: %s -> %s", taskchain, why)
-            self.status.log(f"[MaaCore] 任务链出错: {taskchain} ({why})")
+            logger.error("[MaaCore] 任务链出错: %s -> %s", chain, why)
+            self.status.log(f"[MaaCore] 任务链出错: {chain} ({why})")
             self._chain_outcome = {"state": "error", "why": why}
         elif msg_id == 10001:  # TaskChainStart
-            logger.info("[MaaCore] 任务开始: %s", taskchain)
-            self.status.log(f"[MaaCore] 任务开始: {taskchain}")
+            logger.info("[MaaCore] 任务开始: %s", chain)
+            self.status.log(f"[MaaCore] 任务开始: {chain}")
         elif msg_id == 10002:  # TaskChainCompleted
-            logger.info("[MaaCore] 任务完成: %s", taskchain)
-            self.status.log(f"[MaaCore] 任务完成: {taskchain}")
+            logger.info("[MaaCore] 任务完成: %s", chain)
+            self.status.log(f"[MaaCore] 任务完成: {chain}")
             self._chain_outcome = {"state": "completed", "why": ""}
         elif msg_id == 10004:  # TaskChainStopped
-            logger.info("[MaaCore] 任务被停止: %s", taskchain)
-            self.status.log(f"[MaaCore] 任务被停止: {taskchain}")
+            logger.info("[MaaCore] 任务被停止: %s", chain)
+            self.status.log(f"[MaaCore] 任务被停止: {chain}")
             self._chain_outcome = {"state": "stopped", "why": ""}
         # ---- 子任务错误(计数并在超过上限后跳过当前任务) ----
         elif msg_id == 20000:  # SubTaskError
-            logger.error("[MaaCore] 子任务出错: %s -> %s", taskchain, why)
-            self._on_sub_task_error(taskchain, why)
+            logger.error("[MaaCore] 子任务出错: %s/%s -> %s", chain, subtask, why)
+            self._on_sub_task_error(chain, why, subtask)
 
-    def _on_sub_task_error(self, taskchain: str, why: str) -> None:
+    def _label_chain(self, taskchain: str) -> str:
+        """把 MaaCore 回调的任务链名映射为「中文名(类型)」。
+
+        理智作战与每周剿灭共用 Fight 类型, 仅看类型名无法区分来源;
+        任务串行执行, 当前任务 key 已知, 因此可直接映射为可读名称。
+        """
+        if taskchain and taskchain == self._current_type and self._current_key:
+            return task_display_name(self._current_key, taskchain)
+        return taskchain
+
+    def _on_sub_task_error(self, taskchain: str, why: str, subtask: str = "") -> None:
         """累计当前任务的子任务出错次数, 达到上限后请求跳过该任务。
 
         计数在 MaaCore 回调线程内更新(加锁保护); 超限后只设置跳过标志,
         真正的 AsstStop 由等待循环(_wait_task)执行 —— 回调内不调用核心接口,
         避免 MaaCore 重入/死锁。
+
+        Args:
+            taskchain: 已映射为可读名称的任务链(如 "每周剿灭(Fight)")
+            why: MaaCore 给出的原因
+            subtask: 出错节点的名称(why 为空时用于兜底展示, 便于定位)
         """
         with self._error_lock:
             self._sub_error_count += 1
             count = self._sub_error_count
+        reason = why or subtask or "MaaCore 未提供原因"
         self.status.log(
-            f"[MaaCore] 子任务出错({count}/{MAX_SUB_TASK_ERRORS}): {taskchain} ({why})")
+            f"[MaaCore] 子任务出错({count}/{MAX_SUB_TASK_ERRORS}): {taskchain} ({reason})")
         if count >= MAX_SUB_TASK_ERRORS:
             self._skip_flag.set()
 

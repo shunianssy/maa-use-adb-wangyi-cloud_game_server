@@ -67,7 +67,9 @@ DEFAULT_SETTINGS: Dict = {
         "medicine": 3,          # medicine_mode="num" 时的理智药数量
     },
     "annihilation": {
-        "enabled": True,        # 每周剿灭默认纳入日常(合成玉已满时 MAA 自动跳过)
+        # 每周剿灭默认不勾选(需在控制台「作战设置」中手动勾选才纳入日常):
+        # 该任务在 MaaCore 侧复用 Fight 类型, 默认执行容易与「理智作战」混淆
+        "enabled": False,
         "auto": True,           # True=打满本周合成玉即止(AUTO); False=固定 times 场次
         "times": 4,             # auto=False 时的固定场次
     },

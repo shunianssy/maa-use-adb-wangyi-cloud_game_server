@@ -39,9 +39,10 @@ class TestMaaSettings(unittest.TestCase):
         self.assertIn("signin", s)
         self.assertIn("daily", s)
         self.assertIn("last_daily_run", s)
-        # 新字段默认值: 理智药 AUTO、剿灭默认纳入日常且 AUTO、签到默认开启
+        # 新字段默认值: 理智药 AUTO、剿灭默认不勾选(需手动启用, 避免与理智作战混淆)、
+        # 签到默认开启
         self.assertEqual(s["fight"]["medicine_mode"], "auto")
-        self.assertTrue(s["annihilation"]["enabled"])
+        self.assertFalse(s["annihilation"]["enabled"])
         self.assertTrue(s["annihilation"]["auto"])
         self.assertTrue(s["signin"]["enabled"])
         # 领取奖励六项细分默认全开(对应 Award 任务)

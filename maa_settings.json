@@ -1,11 +1,11 @@
 {
   "tasks": {
     "awaken": true,
-    "recruit": false,
-    "infrast": false,
+    "recruit": true,
+    "infrast": true,
     "combat": true,
-    "credit": false,
-    "reward": false
+    "credit": true,
+    "reward": true
   },
   "fight": {
     "stage": "1-7",
@@ -50,8 +50,8 @@
     "specialaccess": true
   },
   "daily": {
-    "enabled": false,
-    "time": "08:00"
+    "enabled": true,
+    "time": "06:00"
   },
   "last_daily_run": ""
 }

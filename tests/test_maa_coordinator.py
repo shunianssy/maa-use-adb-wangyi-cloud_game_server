@@ -418,5 +418,67 @@ class TestSubTaskErrorSkip(unittest.TestCase):
         self.assertIn("子任务出错达到上限", "\n".join(snap["log"]))
 
 
+class TestTaskLabels(unittest.TestCase):
+    """任务来源可辨识: 理智作战与每周剿灭同用 Fight 类型, 日志必须能区分。
+
+    背景: 每周剿灭在 MaaCore 侧复用 Fight, 日志若只显示 "Fight", 容易误判为
+          "没勾选理智作战却仍在执行"。
+    """
+
+    def test_display_name_mapping(self):
+        self.assertEqual(mc.task_display_name("annihilation", "Fight"), "每周剿灭(Fight)")
+        self.assertEqual(mc.task_display_name("combat", "Fight"), "理智作战(Fight)")
+        self.assertEqual(mc.task_display_name("awaken", "StartUp"), "开始唤醒(StartUp)")
+        # 未收录的 key 回退为 MaaCore 类型名, 保证日志始终可读
+        self.assertEqual(mc.task_display_name("unknown", "Custom"), "Custom")
+
+    def test_chain_callbacks_label_task_source(self):
+        coord = mc.MaaCoordinator()
+        coord.status.start_run(["annihilation"])
+        self.addCleanup(coord.status._close_log_file)
+        coord._current_key, coord._current_type = "annihilation", "Fight"
+        coord._on_maa_msg(10001, json.dumps({"taskchain": "Fight"}))
+        coord._on_maa_msg(10002, json.dumps({"taskchain": "Fight"}))
+        logs = "\n".join(coord.status.snapshot()["log"])
+        self.assertIn("任务开始: 每周剿灭(Fight)", logs)
+        self.assertIn("任务完成: 每周剿灭(Fight)", logs)
+
+    def test_sub_task_error_falls_back_to_subtask_name(self):
+        # MaaCore 的 why 可能为空: 此时用出错节点名兜底, 避免日志出现无信息的 "()"
+        coord = mc.MaaCoordinator()
+        coord.status.start_run(["annihilation"])
+        self.addCleanup(coord.status._close_log_file)
+        coord._current_key, coord._current_type = "annihilation", "Fight"
+        coord._on_maa_msg(20000, json.dumps(
+            {"taskchain": "Fight", "subtask": "StartButton", "why": ""}))
+        logs = "\n".join(coord.status.snapshot()["log"])
+        self.assertIn("每周剿灭(Fight)", logs)
+        self.assertIn("StartButton", logs)
+
+    def test_sub_task_error_without_reason(self):
+        # 原因与节点名都缺失时, 也要给出明确说明而不是空括号
+        coord = mc.MaaCoordinator()
+        coord.status.start_run(["combat"])
+        self.addCleanup(coord.status._close_log_file)
+        coord._current_key, coord._current_type = "combat", "Fight"
+        coord._on_maa_msg(20000, json.dumps({"taskchain": "Fight"}))
+        self.assertIn("未提供原因", "\n".join(coord.status.snapshot()["log"]))
+
+    def test_run_logs_readable_task_sequence(self):
+        # 全流程日志应使用中文名: 任务序列 / 追加任务 / 剿灭跳过说明
+        scripted = _ScriptedAssistant(error_indexes=())
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(mc, "MAA_LOG_DIR", tmp), \
+                 mock.patch("maa_core_wrapper.MaaCoreAssistant", lambda *a, **k: scripted), \
+                 mock.patch.object(mc.time, "sleep", lambda _s: None):
+                coord = mc.MaaCoordinator()
+                coord._run(["annihilation", "combat"])
+        logs = "\n".join(coord.status.snapshot()["log"])
+        self.assertIn("任务序列: 每周剿灭(Fight), 理智作战(Fight)", logs)
+        self.assertIn("追加任务成功: 每周剿灭(Fight)", logs)
+        self.assertIn("追加任务成功: 理智作战(Fight)", logs)
+        self.assertIn("本周合成玉已达上限时 MAA 会直接跳过", logs)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
