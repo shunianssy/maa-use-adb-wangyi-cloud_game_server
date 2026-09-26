@@ -326,6 +326,24 @@ git clone https://github.com/shunianssy/maa-use-adb-wangyi-cloud_game_server.git
 
 该命令依次完成「拉取代码 → 构建镜像 → 启动容器（首次启动自动拉取 MAA 核心与资源）」，无需手工准备资源；完成后浏览器打开 `http://<服务器IP>:22888/ui` 即可使用。
 
+### 更新部署
+
+已有部署需要更新代码时，在项目目录执行：
+
+```bash
+git pull && docker compose up -d --build
+```
+
+PowerShell：
+
+```powershell
+git pull; docker compose up -d --build
+```
+
+-   **更新 MAA 核心与资源版本**：`MAA_AUTO_PULL=force docker compose up -d`（或先 `rm -rf ./maa_data` 再启动）。
+-   **仅改环境变量 / compose 配置**：`docker compose up -d`，无需重新构建镜像。
+-   **排查提示**：若日志出现 `ModuleNotFoundError`（如 `No module named 'maa_settings'`）或 `[entrypoint] starting server.py ...` 这类旧格式日志，说明容器仍在运行旧镜像，执行上面的 `git pull && docker compose up -d --build` 重新构建即可。
+
 ### MAA 自动拉取说明
 
 -   **来源**：官方版本 API（`https://api.maa.plus/MaaAssistantArknights/api/version/stable.json`）→ 资产 `MAA-vX.Y.Z-linux-x86_64.tar.gz`；解压后规范化为 `./maa_data/libMaaCore.so` 与 `./maa_data/resource/`。
@@ -396,11 +414,10 @@ docker run --rm \
 
 -   **首次启动停在 `ensuring MAA core & resource`**：正在下载约 220MB，等待即可；直连 GitHub 缓慢时脚本会自动切换镜像，也可设置 `MAA_RESOURCE_MIRROR` 后重启容器。
 -   **拉取失败 / 一键长草提示 MaaCore 不可用**：确认 `./maa_data` 内含 `libMaaCore.so` 与 `resource/`；或 `MAA_AUTO_PULL=force docker compose up -d` 重新拉取。
--   **更新 MAA 版本**：在 `docker-compose.yml` 中设置 `MAA_AUTO_PULL=force` 后 `docker compose up -d`；或删除 `./maa_data` 再启动。
 -   **容器外访问不到控制台**：确认 `NETEASE_HOST=0.0.0.0` 且端口映射正确，可用 `docker compose ps` 查看端口绑定。
 -   **日志报 `Cloud game 连接失败`**：token 缺失或失效，重新登录 / 注入 `NETEASE_TOKEN` 后重启容器；云游戏免费时长耗尽同样会导致建连失败。
 -   **`server.py did not become ready within 60s`**：多为依赖初始化失败（如 aiortc / ffmpeg），请查看 `docker compose logs` 的完整输出。
--   **更新代码后生效**：`docker compose up -d --build` 重新构建；仅调整环境变量时 `docker compose up -d` 即可。
+-   **更新代码 / MAA 版本**：见上文「更新部署」（`git pull && docker compose up -d --build`）。
 
 ---
 
