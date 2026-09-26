@@ -214,3 +214,4 @@ venv/
 maa_data/
 # 容器可选的持久化目录(token / 设置 / 日志)
 data/
+maa_settings.json
