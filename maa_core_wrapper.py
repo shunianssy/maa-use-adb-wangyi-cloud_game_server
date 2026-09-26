@@ -1,10 +1,10 @@
 """
-MaaCore 官方核心的 Python ctypes 封装(路线 1 实现)。
+MaaCore 官方核心的 Python ctypes 封装(跨平台: Windows 用 MaaCore.dll, Linux 用 libMaaCore.so)。
 
-将 MaaCore.dll 的 C 接口(Asst*)封装为友好的 Python 类, 供一键长草协调器使用。
+将 MaaCore 的 C 接口(Asst*)封装为友好的 Python 类, 供一键长草协调器使用。
 
 初始化顺序(必须遵循 maa-cli 相同流程):
-    1. SetDllDirectoryW(lib 目录)  -> 依赖可解析
+    1. 定位动态库所在目录(Windows 额外 SetDllDirectoryW)  -> 依赖可解析
     2. AsstSetUserDir(存在的目录)
     3. AsstLoadResource(resource 的父目录)
     4. AsstCreate()
@@ -12,33 +12,48 @@ MaaCore 官方核心的 Python ctypes 封装(路线 1 实现)。
     6. AsstConnect(adb_path=fake_adb, address, config)  -> 接云游戏
     7. AsstAppendTask / AsstStart / AsstRunning / AsstStop
 
+动态库位置:
+    - Windows: %APPDATA%\\loong\\maa\\data\\lib\\MaaCore.dll(可被 MAA_LIB_DIR 覆盖)
+    - Linux  : ./maa_data/libMaaCore.so(可被 MAA_LIB_DIR 覆盖,
+               由 scripts/fetch_maa_resource.py 自动拉取, 容器内已设置环境变量)
+
 参考: 官方 AsstCaller.h 与 maa-cli crates/maa-sys 源码。
 """
 
 import ctypes
+import logging
 import os
 import threading
 from typing import Callable, Optional
 
-# --- 默认路径(可由环境变量覆盖, 便于部署) ---
-MAA_LIB_DIR = os.environ.get(
-    "MAA_LIB_DIR",
-    r"C:\Users\user\AppData\Roaming\loong\maa\data\lib",
-)
-MAA_DATA_DIR = os.environ.get(
-    "MAA_DATA_DIR",
-    r"C:\Users\user\AppData\Roaming\loong\maa\data",
-)
-USER_DIR = os.environ.get(
-    "MAA_USER_DIR",
-    os.path.join(MAA_DATA_DIR, "debug"),
-)
+logger = logging.getLogger(__name__)
 
-# 假 adb 可执行文件(MaaCore 以它为 adb 调用)
+# --- 默认路径(可由环境变量覆盖, 便于部署) ---
+_IS_WINDOWS = os.name == "nt"
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 动态库文件名: Windows 为 MaaCore.dll, Linux 为 libMaaCore.so
+LIB_NAME = "MaaCore.dll" if _IS_WINDOWS else "libMaaCore.so"
+
+# 默认数据目录:
+#   Windows: maa-cli 数据目录(内含 lib/ 与 resource/)
+#   Linux  : 仓库内 maa_data/(拉取脚本默认目标, 内含 libMaaCore.so 与 resource/)
+_DEFAULT_DATA_DIR = (
+    r"C:\Users\user\AppData\Roaming\loong\maa\data"
+    if _IS_WINDOWS
+    else os.path.join(_THIS_DIR, "maa_data")
+)
+# 默认动态库目录: Windows 在 data/lib, Linux 与 resource 同级
+_DEFAULT_LIB_DIR = os.path.join(_DEFAULT_DATA_DIR, "lib") if _IS_WINDOWS else _DEFAULT_DATA_DIR
+
+MAA_LIB_DIR = os.environ.get("MAA_LIB_DIR", _DEFAULT_LIB_DIR)
+MAA_DATA_DIR = os.environ.get("MAA_DATA_DIR", _DEFAULT_DATA_DIR)
+USER_DIR = os.environ.get("MAA_USER_DIR", os.path.join(MAA_DATA_DIR, "debug"))
+
+# 假 adb 可执行文件(MaaCore 以它为 adb 调用; Linux 用 adb.sh)
 FAKE_ADB_PATH = os.environ.get(
     "FAKE_ADB_PATH",
-    os.path.join(_THIS_DIR, "fake_adb", "adb.bat"),
+    os.path.join(_THIS_DIR, "fake_adb", "adb.bat" if _IS_WINDOWS else "adb.sh"),
 )
 
 # 云游戏"设备地址"(与 fake_adb 的 FAKE_ADB_SERIAL 对应)
@@ -80,10 +95,10 @@ class MaaCoreAssistant:
         """初始化(仅加载库并记录路径, 实例创建由 connect() 完成)。
 
         Args:
-            lib_dir: MaaCore.dll 所在目录
+            lib_dir: MaaCore 动态库所在目录(Windows 为 MaaCore.dll, Linux 为 libMaaCore.so)
             data_dir: 数据目录(内含 resource/ 子目录)
             user_dir: 用户数据目录(必须存在)
-            adb_path: 假 adb 可执行文件路径(adb.bat)
+            adb_path: 假 adb 可执行文件路径(Windows adb.bat / Linux adb.sh)
             address: 云游戏设备地址
             resource_parent: resource 目录的父目录(默认 data_dir)
         """
@@ -94,7 +109,7 @@ class MaaCoreAssistant:
         self._address = address
         self._resource_parent = resource_parent or data_dir
 
-        self._core: Optional[ctypes.WinDLL] = None
+        self._core: Optional[ctypes.CDLL] = None
         self._handle: Optional[AsstHandle] = None
         self._callback_ref = None  # 保持回调引用防止被 GC
         self._lock = threading.Lock()  # MaaCore 非线程安全, 串行调用
@@ -105,23 +120,44 @@ class MaaCoreAssistant:
     # 动态库加载与签名声明                                                   #
     # ------------------------------------------------------------------ #
     def _load_library(self) -> None:
-        """加载 MaaCore.dll, 声明 C 接口签名。"""
-        dll_path = os.path.join(self._lib_dir, "MaaCore.dll")
-        if not os.path.exists(dll_path):
-            raise MaaCoreError(f"MaaCore.dll 不存在: {dll_path}")
+        """加载 MaaCore 动态库(Windows: MaaCore.dll / Linux: libMaaCore.so), 声明 C 接口签名。"""
+        lib_path = os.path.join(self._lib_dir, LIB_NAME)
+        if not os.path.exists(lib_path):
+            hint = (
+                "请安装 MAA 或通过 MAA_LIB_DIR 指定目录"
+                if _IS_WINDOWS
+                else "可运行 python scripts/fetch_maa_resource.py 自动拉取"
+            )
+            raise MaaCoreError(f"{LIB_NAME} 不存在: {lib_path}({hint})")
 
-        # 1) DLL 搜索路径(复刻 maa-cli runtime.rs)
-        os.environ["PATH"] = self._lib_dir + ";" + os.environ.get("PATH", "")
-        try:
-            ctypes.windll.kernel32.SetDllDirectoryW(self._lib_dir)
-        except Exception:
-            pass
+        if _IS_WINDOWS:
+            # 1) DLL 搜索路径(复刻 maa-cli runtime.rs)
+            os.environ["PATH"] = self._lib_dir + ";" + os.environ.get("PATH", "")
+            try:
+                ctypes.windll.kernel32.SetDllDirectoryW(self._lib_dir)
+            except Exception:
+                pass
+            loader = ctypes.WinDLL
+        else:
+            # Linux: dlopen 不会自动搜索主库所在目录, 依赖库(onnxruntime 等)需要
+            # LD_LIBRARY_PATH 在进程启动前就包含该目录(容器 entrypoint 已导出)。
+            search_paths = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+            if self._lib_dir not in search_paths:
+                logger.warning(
+                    "LD_LIBRARY_PATH 未包含 %s; 若加载失败请先 export LD_LIBRARY_PATH=%s:$LD_LIBRARY_PATH",
+                    self._lib_dir, self._lib_dir,
+                )
+            # RTLD_GLOBAL: 让后续加载的依赖共享符号表
+            loader = ctypes.CDLL
 
-        # 2) 加载
+        # 2) 加载(Linux 用 RTLD_GLOBAL, 便于依赖库共享符号)
         try:
-            self._core = ctypes.WinDLL(dll_path)
+            self._core = (
+                loader(lib_path) if _IS_WINDOWS
+                else loader(lib_path, mode=ctypes.RTLD_GLOBAL)
+            )
         except OSError as e:
-            raise MaaCoreError(f"MaaCore.dll 加载失败(检查依赖): {e}") from e
+            raise MaaCoreError(f"{LIB_NAME} 加载失败(检查依赖库): {e}") from e
 
         core = self._core
         # 签名声明(依据 AsstCaller.h)

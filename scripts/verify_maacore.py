@@ -1,8 +1,8 @@
 """
-验证 ctypes 能否驱动 MAA 官方核心 MaaCore.dll(路线 1 可行性验证)。
+验证 ctypes 能否驱动 MAA 官方核心(Windows: MaaCore.dll / Linux: libMaaCore.so)。
 
 按 maa-cli 的强制初始化顺序:
-    1. SetDllDirectoryW(指向 lib 目录)   -> 依赖可解析
+    1. 定位动态库目录(Windows 额外 SetDllDirectoryW) -> 依赖可解析
     2. AsstSetUserDir(存在的用户目录路径)
     3. AsstLoadResource(resource 的父目录)
     4. AsstCreate() / AsstCreateEx()
@@ -12,19 +12,24 @@
 - AsstGetVersion 正常 + AsstLoadResource 返回 1 + AsstCreate 非空
   => 证明 MAA 官方核心可被 Python 驱动, 且能解析含 ClickSelf 的官方资源。
 
-运行: .venv\\Scripts\\python.exe scripts/verify_maacore.py
+运行:
+    Windows: .venv\\Scripts\\python.exe scripts/verify_maacore.py
+    容器内:  docker compose exec netease-maa python scripts/verify_maacore.py
 """
 
 import ctypes
 import os
 import sys
 
-# --- 由 `maa dir` 输出得到的路径 ---
-MAA_LIB_DIR = r"C:\Users\user\AppData\Roaming\loong\maa\data\lib"
-MAA_DATA_DIR = r"C:\Users\user\AppData\Roaming\loong\maa\data"   # resource 的父目录
-RESOURCE_DIR = os.path.join(MAA_DATA_DIR, "resource")
-# 用户目录(AsstSetUserDir 要求已存在): 使用 maa 数据目录下的 debug/log 根
-USER_DIR = os.path.join(MAA_DATA_DIR, "debug")
+# 复用主程序的环境变量与默认路径(避免两处维护)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from maa_core_wrapper import (  # noqa: E402  (需先补 sys.path 才能导入)
+    LIB_NAME,
+    MAA_DATA_DIR,
+    MAA_LIB_DIR,
+    USER_DIR,
+    _IS_WINDOWS,
+)
 
 
 def ensure_user_dir() -> None:
@@ -33,25 +38,49 @@ def ensure_user_dir() -> None:
     print(f"[OK] 用户目录就绪: {USER_DIR}")
 
 
+def load_core():
+    """按平台加载动态库。
+
+    Returns:
+        动态库对象; 加载失败返回 None。
+    """
+    lib_path = os.path.join(MAA_LIB_DIR, LIB_NAME)
+    if not os.path.exists(lib_path):
+        print(f"[FAIL] 未找到动态库: {lib_path}")
+        print("       可运行 python scripts/fetch_maa_resource.py 自动拉取(或设置 MAA_LIB_DIR)")
+        return None
+
+    if _IS_WINDOWS:
+        # 依赖 DLL 搜索: 复刻 runtime.rs 的 SetDllDirectoryW
+        os.environ["PATH"] = MAA_LIB_DIR + ";" + os.environ.get("PATH", "")
+        try:
+            ctypes.windll.kernel32.SetDllDirectoryW(MAA_LIB_DIR)
+            print(f"[OK] SetDllDirectoryW -> {MAA_LIB_DIR}")
+        except Exception as e:
+            print(f"[WARN] SetDllDirectoryW 失败(依赖可能仍可解析): {e}")
+        loader = ctypes.WinDLL
+    else:
+        if MAA_LIB_DIR not in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep):
+            print(f"[WARN] LD_LIBRARY_PATH 未包含 {MAA_LIB_DIR}(容器 entrypoint 已自动设置)")
+        loader = ctypes.CDLL
+
+    try:
+        core = loader(lib_path)
+    except OSError as e:
+        print(f"[FAIL] 无法加载 {LIB_NAME}: {e}")
+        return None
+    print(f"[OK] 已加载 {LIB_NAME} -> {lib_path}")
+    return core
+
+
 def main() -> int:
     """验证流程, 返回进程退出码。"""
-    # 0) 依赖 DLL 搜索: 复刻 runtime.rs 的 SetDllDirectoryW
-    os.environ["PATH"] = MAA_LIB_DIR + ";" + os.environ.get("PATH", "")
-    try:
-        ctypes.windll.kernel32.SetDllDirectoryW(MAA_LIB_DIR)
-        print(f"[OK] SetDllDirectoryW -> {MAA_LIB_DIR}")
-    except Exception as e:
-        print(f"[WARN] SetDllDirectoryW 失败(依赖可能仍可解析): {e}")
-
-    # 1) 加载 MaaCore.dll
-    try:
-        core = ctypes.WinDLL(os.path.join(MAA_LIB_DIR, "MaaCore.dll"))
-    except OSError as e:
-        print(f"[FAIL] 无法加载 MaaCore.dll: {e}")
+    # 1) 加载动态库
+    core = load_core()
+    if core is None:
         return 1
-    print(f"[OK] 已加载 MaaCore.dll")
 
-    # 2) 声明接口签名(依据官方 AsstCaller.h / maa.wo)
+    # 2) 声明接口签名(依据官方 AsstCaller.h)
     core.AsstGetVersion.restype = ctypes.c_char_p
     core.AsstSetUserDir.argtypes = [ctypes.c_char_p]
     core.AsstSetUserDir.restype = ctypes.c_uint8
@@ -90,8 +119,8 @@ def main() -> int:
     core.AsstDestroy(handle)
     print("[OK] AsstDestroy 完成")
 
-    print("\n>>> 结论: ctypes 已能完整驱动 MaaCore.dll(加载资源 + 创建实例) <<<")
-    print(">>> 这证明路线 1 可行: 可直接用官方 Asst* 接口跑明日方舟任务 <<<")
+    print(f"\n>>> 结论: ctypes 已能完整驱动 {LIB_NAME}(加载资源 + 创建实例) <<<")
+    print(">>> 这证明可直接用官方 Asst* 接口跑明日方舟任务 <<<")
     return 0
 
 

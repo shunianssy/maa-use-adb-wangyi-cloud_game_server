@@ -19,7 +19,7 @@
 -   **云游戏签到**：一键领取网易云游戏平台每日奖励时长（接口 `POST /api/v2/sign-today`，与网页端一致）；只要已登录（有 token 文件）即可签到，无需先启动云游戏。
 -   **可视化日志**：一键长草日志实时输出，同时自动落盘 `logs/maa_*.log` 便于排查。
 -   **双通道**：HTTP API（外部脚本 / MAA 桥接）+ WebSocket（控制台画面与状态同步）。
--   **部署友好**：支持环境变量注入 token 的容器化部署；Windows 下启动自动清理占用端口的残留进程。
+-   **部署友好**：容器化部署支持环境变量注入 token，并在首次启动时自动拉取 MAA 官方 Linux 核心与资源（支持镜像加速）；Windows 下启动自动清理占用端口的残留进程。
 
 ---
 
@@ -37,25 +37,28 @@
 
 -   **设备链路（本机 Windows）**：MaaCore 通过 `AsstConnect(adb_path=...)` 调用 adb，`fake_adb/adb.bat` 伪装成 adb 可执行文件，把 `exec-out screencap -p`、`shell input tap/swipe/text` 等命令转发到 `server.py` 的 HTTP 接口；实例的 `TouchMode` 设为 `adb`，规避 minitouch/maatouch 部署。
 -   **WebUI 链路**：前端通过 WebSocket 接收状态与 JPEG 帧（约 8 FPS），并用每 2 秒轮询 `/maa/status` 兜底同步连接状态。
--   **容器/无头链路**：`maa_bridge/` 使用 MaaFw（MaaFramework Python 绑定）的 CustomController 直接对接 HTTP 接口，由容器入口脚本启动，无需假 adb。
+-   **容器/无头链路**：容器内使用官方 **Linux MaaCore**（`libMaaCore.so` + 官方 `resource`，由 `scripts/fetch_maa_resource.py` 在首次启动时自动拉取），假 adb 换成 `fake_adb/adb.sh`，链路与本机一致；`maa_bridge/`（MaaFw CustomController）保留为备选桥接方案。
 
 ---
+
 
 ## 目录结构
 
 ```
 server.py                  # 云游戏 HTTP 服务 + WebUI 后端 + 每日定时检查
 maa_coordinator.py         # 一键长草协调器(MaaCore 在子线程执行, 日志落盘)
-maa_core_wrapper.py        # MaaCore.dll 的 ctypes 封装(Asst* C 接口)
+maa_core_wrapper.py        # MaaCore 的 ctypes 封装(Windows MaaCore.dll / Linux libMaaCore.so)
 maa_settings.py            # 一键长草设置读写(原子化落盘 maa_settings.json)
 netease_login.py           # 网易云游戏登录(短信/密码)与每日签到(按线上接口抓包实现)
-fake_adb/                  # 假 adb 桥(adb.bat + fake_adb.py)
+fake_adb/                  # 假 adb 桥(Windows adb.bat / Linux adb.sh + fake_adb.py)
 maa_pipeline/              # pipeline 占位示例(真实任务请指向官方 resource)
-maa_bridge/                # MaaFramework 自定义控制器(容器/无头场景)
+maa_bridge/                # MaaFramework 自定义控制器(备选桥接模式)
 webui/                     # 前端控制台(index.html + static/)
 sdk/                       # 内置的网易云游戏 SDK(连接 / 签到)
-scripts/verify_maacore.py  # 验证 MaaCore.dll 可被 ctypes 驱动的自检脚本
+scripts/fetch_maa_resource.py  # MAA 核心与资源自动拉取(容器首次启动调用)
+scripts/verify_maacore.py  # 验证 MaaCore 可被 ctypes 驱动的自检脚本(跨平台)
 tests/                     # unittest 测试集
+maa_data/                  # 容器自动拉取的 MaaCore + resource(运行时生成, 已 gitignore)
 Dockerfile / docker-compose.yml / entrypoint.sh
 ```
 
@@ -91,6 +94,7 @@ pip install -r requirements.txt
 ### 4. 启动服务
 
 ```powershell
+.venv\Scripts\Activate.ps1
 python server.py
 ```
 
@@ -270,10 +274,13 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111",
 | `NETEASE_WIDTH` / `NETEASE_HEIGHT` | `1280` / `720` | 请求的云游戏分辨率 |
 | `NETEASE_WEBUI_DIR` | `webui/` | 前端静态资源目录 |
 | `NETEASE_MAA_SETTINGS` | `maa_settings.json` | 一键长草设置文件路径 |
-| `MAA_LIB_DIR` | `%APPDATA%\loong\maa\data\lib` | `MaaCore.dll` 所在目录 |
-| `MAA_DATA_DIR` | `%APPDATA%\loong\maa\data` | MAA 数据目录（需含 `resource/`） |
-| `MAA_USER_DIR` | `<MAA_DATA_DIR>\debug` | MaaCore 实例用户目录（必须已存在） |
-| `FAKE_ADB_PATH` | `fake_adb/adb.bat` | 传给 MaaCore 的假 adb 路径 |
+| `MAA_AUTO_PULL` | `1` | 容器自动拉取 MAA：`1` 缺失时拉取 / `0` 关闭 / `force` 强制更新 |
+| `MAA_RESOURCE_MIRROR` | 空 | MAA 下载镜像前缀（如 `https://ghfast.top/`）；留空时直连优先、失败自动切内置镜像 |
+| `MAA_RESOURCE_URL` | 空 | 显式指定 MAA 压缩包地址（zip / tar.gz），跳过版本 API |
+| `MAA_LIB_DIR` | Windows `%APPDATA%\loong\maa\data\lib`；Linux `./maa_data` | MaaCore 动态库目录（`MaaCore.dll` / `libMaaCore.so`） |
+| `MAA_DATA_DIR` | Windows `%APPDATA%\loong\maa\data`；Linux `./maa_data` | MAA 数据目录（需含 `resource/`） |
+| `MAA_USER_DIR` | `<MAA_DATA_DIR>/debug` | MaaCore 实例用户目录（必须已存在） |
+| `FAKE_ADB_PATH` | Windows `fake_adb/adb.bat`；Linux `fake_adb/adb.sh` | 传给 MaaCore 的假 adb 路径 |
 | `FAKE_ADB_BASE` | `http://127.0.0.1:22888` | 假 adb 转发的云游戏 HTTP 地址 |
 | `FAKE_ADB_SERIAL` | `127.0.0.1:5555` | 伪设备序列号（与 `AsstConnect` 的 address 一致） |
 
@@ -281,11 +288,17 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111",
 
 ## MAA 核心与资源准备
 
--   引擎从 `MAA_LIB_DIR` 加载 `MaaCore.dll`（初始化顺序严格对齐 maa-cli：`SetDllDirectoryW` → `AsstSetUserDir` → `AsstLoadResource` → `AsstCreate` → `AsstConnect`）。
--   路径不同时请通过环境变量覆盖，并先运行自检脚本确认可驱动：
+-   引擎从 `MAA_LIB_DIR` 加载动态库（Windows `MaaCore.dll` / Linux `libMaaCore.so`；初始化顺序严格对齐 maa-cli：定位库目录 → `AsstSetUserDir` → `AsstLoadResource` → `AsstCreate` → `AsstConnect`）。
+-   路径不同时请通过环境变量覆盖，并先运行自检脚本（跨平台）确认可驱动：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/verify_maacore.py
+```
+
+-   缺少核心或资源时可用脚本自动拉取官方 Linux 包（含 `libMaaCore.so` 与 `resource/`）：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/fetch_maa_resource.py .\maa_data
 ```
 
 -   仓库内的 `maa_pipeline/` 仅为占位示例 pipeline，无法用于真实任务；请使用官方 `resource`（MAA 发行版或 maa-cli 资源目录）。
@@ -295,29 +308,32 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111",
 
 ## 容器部署
 
-适用于服务器 / NAS / 无图形界面的 Linux 环境：单个容器内同时运行「云游戏 HTTP 服务（`server.py`）」与「MAA 桥接（`maa_bridge`，MaaFw 自定义控制器）」，无需模拟器与假 adb，浏览器直接访问控制台。
+适用于服务器 / NAS / 无图形界面的 Linux 环境：容器内运行**官方 Linux MaaCore**（`libMaaCore.so` + 官方 `resource`）与假 adb 桥，一键长草能力与 Windows 本机一致；`maa_bridge`（MaaFw 自定义控制器）保留作备选。
 
-### 前置条件
-
--   Docker 20.10+ 与 Docker Compose v2（`docker compose version` 验证；老版本请使用 `docker-compose` 命令）
--   建议预留 2 GB 以上磁盘（镜像内置 ffmpeg 与 MaaFw 运行时）
--   一个有效的网易云游戏 token（可选，也可先启动容器再在控制台内登录）
--   MAA 资源 bundle（可选）：含 `pipeline/`、`image/`、`model/` 的官方 `resource` 目录，用于执行具体任务
-
-### 方式一：Docker Compose（推荐）
+### 一键部署（推荐）
 
 ```bash
-docker compose up -d --build   # 构建镜像并在后台启动
-docker compose logs -f         # 实时查看日志（Ctrl+C 仅退出查看，容器继续运行）
-docker compose down            # 停止并删除容器
+git clone https://github.com/shunianssy/maa-use-adb-wangyi-cloud_game_server.git \
+  && cd maa-use-adb-wangyi-cloud_game_server \
+  && docker compose up -d --build
 ```
 
-`docker-compose.yml` 默认编排：
+PowerShell（不支持 `&&`，改用 `;` 分隔）：
 
--   端口映射 `22888:22888`（宿主机端口可按需改为 `其他端口:22888`）。
--   环境变量 `NETEASE_HOST=0.0.0.0`（必须，否则容器外无法访问）、`NETEASE_PORT=22888`、`NETEASE_GAME_CODE=mrfz`。
--   资源挂载 `./maa_resource:/app/resource:ro`，桥接以 `--resource /app/resource` 参数启动。
--   重启策略 `unless-stopped`；取消注释 `NETEASE_TOKEN=your-token-here` 可注入登录凭证。
+```powershell
+git clone https://github.com/shunianssy/maa-use-adb-wangyi-cloud_game_server.git; cd maa-use-adb-wangyi-cloud_game_server; docker compose up -d --build
+```
+
+该命令依次完成「拉取代码 → 构建镜像 → 启动容器（首次启动自动拉取 MAA 核心与资源）」，无需手工准备资源；完成后浏览器打开 `http://<服务器IP>:22888/ui` 即可使用。
+
+### MAA 自动拉取说明
+
+-   **来源**：官方版本 API（`https://api.maa.plus/MaaAssistantArknights/api/version/stable.json`）→ 资产 `MAA-vX.Y.Z-linux-x86_64.tar.gz`；解压后规范化为 `./maa_data/libMaaCore.so` 与 `./maa_data/resource/`。
+-   **通道**：直连 GitHub 优先，失败自动切换内置镜像（ghfast.top / gh-proxy.com / ghproxy.net）；也可显式指定 `MAA_RESOURCE_MIRROR`。
+-   **幂等**：`./maa_data` 已就绪时跳过下载，容器重启不会重复拉取。
+-   **开关**：`MAA_AUTO_PULL=1`（默认，缺失时拉取）/ `0`（关闭，自行准备）/ `force`（强制更新到最新版）。
+-   **预拉取（可选，需 Python 3.10+）**：`python scripts/fetch_maa_resource.py ./maa_data`；容器启动时检测到已就绪会自动跳过。
+-   **失败不阻断**：拉取失败仅告警，网页控制台与手动操作仍可用，修复后重启容器即可恢复一键长草。
 
 ### 方式二：手动 docker build / docker run
 
@@ -325,30 +341,29 @@ docker compose down            # 停止并删除容器
 # 1) 构建镜像
 docker build -t netease-cloud-game-maa .
 
-# 2) 启动为守护容器（桥接进入宿主模式，等待外部触发）
+# 2) 启动(MaaCore 模式: 首次启动自动拉取 MAA 到容器内 /app/maa_data)
 docker run -d --name netease-maa \
   -p 22888:22888 \
   -e NETEASE_HOST=0.0.0.0 \
   -e NETEASE_PORT=22888 \
   -e NETEASE_TOKEN=你的token \
-  -v "$PWD/maa_resource:/app/resource:ro" \
-  netease-cloud-game-maa --resource /app/resource
+  -v "$PWD/maa_data:/app/maa_data" \
+  netease-cloud-game-maa
 
-# 3) 直接执行一个 MAA 任务（前台运行，任务结束后容器退出）
+# 3) 备选: 桥接模式(ENTRYPOINT 后带参数即启用, 前台运行 maa_bridge, 任务结束后容器退出)
 docker run --rm \
   -p 22888:22888 \
   -e NETEASE_HOST=0.0.0.0 \
-  -e NETEASE_TOKEN=你的token \
-  -v "$PWD/maa_resource:/app/resource:ro" \
+  -v "$PWD/maa_fw_resource:/app/resource:ro" \
   netease-cloud-game-maa --resource /app/resource --task Main
 ```
 
-`ENTRYPOINT` 之后的参数会透传给 `maa_bridge`（`entrypoint.sh` 中 `python -m maa_bridge.main "$@"`）：
+桥接模式参数（由 `entrypoint.sh` 透传给 `maa_bridge`）：
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:22888` | 容器内云游戏 HTTP 服务地址 |
-| `--resource` | 无 | MAA 资源 bundle 目录（加载后才可执行任务） |
+| `--resource` | 无 | MaaFramework 资源 bundle 目录（需含 `pipeline/`、`image/`） |
 | `--task` | 无 | 任务名（需与 `--resource` 配合；缺省则驻留等待） |
 | `--connect-timeout` | `180` | 等待云游戏连接就绪的超时秒数 |
 | `--width` / `--height` | `1280` / `720` | 兜底分辨率 |
@@ -356,7 +371,7 @@ docker run --rm \
 
 ### 容器启动流程
 
-`entrypoint.sh` 依次执行：注入 `NETEASE_TOKEN`（可选，不覆盖已存在的 token 文件）→ 后台启动 `server.py` → 轮询 `/info` 等待就绪（最多 60s，超时则整体退出）→ 前台运行 `maa_bridge`（透传多余参数）→ 收到停止信号时同步关闭 `server.py`。
+`entrypoint.sh` 依次执行：注入 `NETEASE_TOKEN`（可选，不覆盖已有 token 文件）→ 检测/自动拉取 MAA 到 `MAA_DATA_DIR`（默认 `/app/maa_data`）→ 导出 `MAA_LIB_DIR` / `MAA_DATA_DIR` / `MAA_USER_DIR` / `FAKE_ADB_PATH`（`fake_adb/adb.sh`）与 `LD_LIBRARY_PATH` → 前台运行 `server.py`。带参数启动时切换为桥接模式：后台 `server.py` → 等待 `/info` 就绪（最多 60s）→ 前台 `maa_bridge`。
 
 ### 数据持久化（可选）
 
@@ -364,6 +379,7 @@ docker run --rm \
 
 | 容器内路径 | 内容 | 挂载示例 |
 | --- | --- | --- |
+| `/app/maa_data` | MAA 核心与资源（compose 已默认挂载） | `-v ./maa_data:/app/maa_data` |
 | `/app/token` | 登录 token | `-v ./data/token:/app/token` |
 | `/app/maa_settings.json` | 一键长草设置 | `-v ./data/maa_settings.json:/app/maa_settings.json` |
 | `/app/logs` | 任务日志 | `-v ./data/logs:/app/logs` |
@@ -373,15 +389,16 @@ docker run --rm \
 1.  浏览器打开 `http://<服务器IP>:22888/ui`（根路径 `/` 同样直达控制台）。
 2.  首次使用在「云游戏账号」卡片内登录（短信 / 密码），或提前通过 `NETEASE_TOKEN` 注入。
 3.  点「启动云游戏」验证画面；`GET /info` 返回 `{"status":"ok", ...}` 即连接正常。
-4.  `docker compose logs -f` 中可见 `[entrypoint]` 与桥接日志；一键长草日志同时落盘 `/app/logs/maa_*.log`。
-
-> **注意**：容器为 Linux 环境，不含 Windows 专用的 `MaaCore.dll` 与假 adb 桥；容器内任务请通过 `maa_bridge`（`--resource` + `--task`）执行，WebUI 主要负责画面查看、手动操作、账号登录与云游戏签到。
+4.  验证 MaaCore 就绪：`docker compose exec netease-maa python scripts/verify_maacore.py`（应输出 `AsstLoadResource ... 资源加载成功`）。
+5.  `docker compose logs -f` 可见 `[entrypoint] ensuring MAA ...`、`MAA ready` 与后续运行日志；一键长草日志同时落盘 `/app/logs/maa_*.log`。
 
 ### 常见问题（容器）
 
+-   **首次启动停在 `ensuring MAA core & resource`**：正在下载约 220MB，等待即可；直连 GitHub 缓慢时脚本会自动切换镜像，也可设置 `MAA_RESOURCE_MIRROR` 后重启容器。
+-   **拉取失败 / 一键长草提示 MaaCore 不可用**：确认 `./maa_data` 内含 `libMaaCore.so` 与 `resource/`；或 `MAA_AUTO_PULL=force docker compose up -d` 重新拉取。
+-   **更新 MAA 版本**：在 `docker-compose.yml` 中设置 `MAA_AUTO_PULL=force` 后 `docker compose up -d`；或删除 `./maa_data` 再启动。
 -   **容器外访问不到控制台**：确认 `NETEASE_HOST=0.0.0.0` 且端口映射正确，可用 `docker compose ps` 查看端口绑定。
 -   **日志报 `Cloud game 连接失败`**：token 缺失或失效，重新登录 / 注入 `NETEASE_TOKEN` 后重启容器；云游戏免费时长耗尽同样会导致建连失败。
--   **`--resource` 报加载失败**：确认挂载目录内含 `pipeline/`、`image/`、`model/`；若宿主机 `./maa_resource` 不存在，Docker 会自动创建空目录，导致校验失败。
 -   **`server.py did not become ready within 60s`**：多为依赖初始化失败（如 aiortc / ffmpeg），请查看 `docker compose logs` 的完整输出。
 -   **更新代码后生效**：`docker compose up -d --build` 重新构建；仅调整环境变量时 `docker compose up -d` 即可。
 
@@ -393,7 +410,7 @@ docker run --rm \
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-覆盖内容：一键长草参数构造与任务状态机、假 adb 命令翻译、设置读写与原子落盘、控制器契约、端口占用清理等。
+覆盖内容：一键长草参数构造与任务状态机、假 adb 命令翻译、设置读写与原子落盘、控制器契约、端口占用清理、MAA 自动拉取（版本 API 解析 / 镜像回退 / 断点续传 / 解压安装）、MaaCore 跨平台默认值等。
 
 ---
 
@@ -406,7 +423,7 @@ docker run --rm \
 -   **连接失败、截图超时**：云游戏免费时长耗尽时云端会拒绝建连，请先在网易云游戏完成签到或充值后重试。
 -   **端口被占用**：Windows 下启动时会自动结束占用 `22888` 端口的残留进程（最多重试 3 次）。
 -   **浏览器显示「未连接」但终端已就绪**：后端通过 WebSocket 广播 + 每 2 秒轮询 `/maa/status` 双通道同步；若仍异常请强制刷新页面（Ctrl+Shift+R）。
--   **为什么不用 MaaFramework 内置资源跑任务**：官方 `resource` 含 `ClickSelf` 等动作，需由 MaaCore 核心解析；容器场景的 `maa_bridge` 则用 MaaFw 绑定实现 HTTP 自定义控制器。
+-   **为什么不用 MaaFramework 跑官方任务**：官方 `resource` 是 MaaCore 格式（`algorithm`、`ClickSelf` 等），MaaFw 只认 `recognition`、`Click` 等 Fw 动作，直接加载会失败；因此容器部署自动拉取的是**官方 Linux MaaCore**，`maa_bridge` 仅作为自定义 Fw pipeline 的备选桥接。
 
 ---
 

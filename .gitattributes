@@ -1,0 +1,9 @@
+# 统一行尾策略
+# 说明: Linux 容器内的 shell 脚本若为 CRLF 会执行失败(`/bin/sh^M: bad interpreter`),
+#       因此在 Windows 上克隆后也必须保持 LF。
+* text=auto
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+*.bat text eol=crlf

@@ -209,3 +209,8 @@ __marimo__/
 token
 .venv/
 venv/
+
+# MAA 核心与资源(容器首次启动自动拉取, 体积约数百 MB, 不入库)
+maa_data/
+# 容器可选的持久化目录(token / 设置 / 日志)
+data/

@@ -8,3 +8,7 @@ token
 demo.jpg
 demo2.png
 *.log
+# MAA 核心与资源由容器首次启动时自动拉取, 不进入构建上下文
+maa_data
+data
+logs

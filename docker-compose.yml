@@ -1,7 +1,11 @@
-# 网易云游戏 MAA 桥接 - 服务器端编排示例
-# 用法:
-#   docker compose up -d --build
-#   docker compose logs -f
+# 网易云游戏 MAA - 服务器端编排(推荐部署方式)
+#
+# 一键部署:
+#   git clone https://github.com/shunianssy/maa-use-adb-wangyi-cloud_game_server.git \
+#     && cd maa-use-adb-wangyi-cloud_game_server && docker compose up -d --build
+#
+# 首次启动会自动拉取 MAA 官方 Linux 核心与资源(约 220MB)到 ./maa_data,
+# 之后重启复用; 国内网络若拉取失败, 取消下面 MAA_RESOURCE_MIRROR 注释后重启即可。
 services:
   netease-maa:
     build: .
@@ -10,13 +14,21 @@ services:
     ports:
       - "22888:22888"
     environment:
-      # 无交互登录二选一(推荐环境变量): 登录后获得的 token
+      # 容器内必须监听 0.0.0.0, 否则宿主机无法访问
       - NETEASE_HOST=0.0.0.0
       - NETEASE_PORT=22888
       - NETEASE_GAME_CODE=mrfz
+      # 无交互登录: 填入登录后获得的 token(也可起来后在网页控制台登录)
       # - NETEASE_TOKEN=your-token-here
+      # 自动拉取 MAA: 1=缺失时拉取(默认) / 0=关闭 / force=强制更新到最新版
+      # - MAA_AUTO_PULL=1
+      # 国内网络下载加速(直连失败时会自动尝试内置镜像, 也可显式指定)
+      # - MAA_RESOURCE_MIRROR=https://ghfast.top/
     volumes:
-      # 可选: 挂载 MAA pipeline 资源 bundle(含 pipeline/ image/ model/ 目录)
-      - ./maa_resource:/app/resource:ro
-    command: ["--resource", "/app/resource"]
+      # MAA 核心与资源(首次启动自动拉取; 删除该目录可用于重新拉取)
+      - ./maa_data:/app/maa_data
+      # 可选: 持久化登录 token / 设置 / 日志(容器重建不丢失)
+      # - ./data/token:/app/token
+      # - ./data/maa_settings.json:/app/maa_settings.json
+      # - ./data/logs:/app/logs
     restart: unless-stopped
