@@ -7,7 +7,7 @@ do_click / do_swipe / do_input 与 status_payload, 不依赖真实云游戏连�
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # 先 stub sdk.wsconnect, 避免测试触发真实网络 import 开销
 import sys
@@ -35,6 +35,32 @@ _sdk_pkg.signin = _fake_signin
 sys.modules["sdk.signin"] = _fake_signin
 
 import server  # noqa: E402
+
+
+class TestDailyStatusLog(unittest.IsolatedAsyncioTestCase):
+    """每日定时状态输出: 必须明确区分「已启用 / 未启用」, 不得出现自相矛盾的文案。"""
+
+    def test_enabled_message(self):
+        with patch("builtins.print") as printer:
+            server._print_daily_status({"enabled": True, "time": "08:00"})
+        text = " ".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("已启用", text)
+        self.assertIn("每天 08:00", text)
+        self.assertNotIn("未启用", text)
+
+    def test_disabled_message(self):
+        with patch("builtins.print") as printer:
+            server._print_daily_status({})
+        text = " ".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("未启用", text)
+        self.assertNotIn("已启用", text)
+
+    def test_disabled_message_guides_user(self):
+        # 未启用时给出明确指引(避免用户不知道去哪里开)
+        with patch("builtins.print") as printer:
+            server._print_daily_status({"enabled": False, "time": ""})
+        text = " ".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("网页控制台", text)
 
 
 class AsyncTest(unittest.IsolatedAsyncioTestCase):

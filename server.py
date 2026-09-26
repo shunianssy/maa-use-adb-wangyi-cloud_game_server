@@ -738,7 +738,12 @@ async def handle_maa_settings_save(request: web.Request):
         return web.json_response({"status": "error", "message": "Invalid request body"}, status=400)
     if not isinstance(patch, dict):
         return web.json_response({"status": "error", "message": "settings must be an object"}, status=400)
+    before_daily = maa_settings.get().get("daily") or {}
     updated = maa_settings.update(patch)
+    # 「每日定时」有实际改动时在控制台打印最新状态(与启动横幅区分, 避免混淆)
+    after_daily = updated.get("daily") or {}
+    if after_daily != before_daily:
+        _print_daily_status(after_daily)
     return web.json_response({"status": "ok", "settings": updated})
 
 
@@ -847,6 +852,22 @@ async def handle_maa_daily_test(request: web.Request):
     _spawn_bg(_run_daily_flow("测试执行"))
     return web.json_response(
         {"status": "ok", "message": "测试执行已开始(启动云游戏 → 一键长草), 请查看日志"})
+
+
+def _print_daily_status(daily: dict) -> None:
+    """打印每日定时任务的当前状态(启动横幅与设置变更时共用)。
+
+    状态实时取自 maa_settings.json, 控制台以"最新一次打印"为准:
+      - 启动时打印一次(启动瞬间的快照)
+      - 之后每次通过网页控制台改动「每日定时」都会重新打印
+    """
+    time_str = str(daily.get("time") or "08:00")
+    if daily.get("enabled"):
+        print(f"{Colors.GREEN}[OK] 每日定时任务: 已启用(每天 {time_str} 自动执行)"
+              f"{Colors.RESET}", flush=True)
+    else:
+        print(f"{Colors.YELLOW}[--] 每日定时任务: 未启用(可在网页控制台「每日定时执行」开启)"
+              f"{Colors.RESET}", flush=True)
 
 
 async def daily_checker():
@@ -1316,8 +1337,7 @@ async def run_server():
     # 启动每日定时检查任务(到期自动执行云游戏 + 一键长草)
     global _daily_checker_task
     _daily_checker_task = asyncio.create_task(daily_checker())
-    print(f"{Colors.GREEN}[OK] 每日定时任务已启用(当前设置: "
-          f"{'开启 ' + maa_settings.get()['daily'].get('time', '') if maa_settings.get()['daily'].get('enabled') else '关闭'}){Colors.RESET}")
+    _print_daily_status(maa_settings.get().get("daily") or {})
     
     print(f"{Colors.GREEN}{Colors.BOLD}[OK] API server is running at http://{HOST}:{PORT}{Colors.RESET}")
     print(f"{Colors.YELLOW}Send POST to /start to connect to the cloud game.{Colors.RESET}")
