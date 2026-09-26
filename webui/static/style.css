@@ -373,6 +373,8 @@ html, body {
   user-select: none;
 }
 .inline-check input { accent-color: var(--accent); }
+/* 库存保持: 保持项名称固定宽度, 目标数量输入框对齐(多行竖排便于扫读) */
+#inventoryOptions .inline-check span { min-width: 132px; }
 .opt-note { margin: 0; font-size: 11px; color: var(--text-dim); }
 .fight-options .hint { flex: none; font-size: 11px; }
 .fight-options input[type="time"] {

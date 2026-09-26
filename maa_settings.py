@@ -19,6 +19,12 @@
       "facility": ["Mfg", "Trade", ...],            # 参与换班的设施
       "drones": "Money", "threshold": 0.3, ...
   },
+  "inventory": {                                    # 库存保持(仓库扫描+缺口规划)
+      "chip_low": {"enabled": false, "count": 20},  # 低级芯片(全职业)目标数量
+      "chip_high": {"enabled": false, "count": 20}, # 高级芯片组(全职业)
+      "certificate": {"enabled": false, "count": 20},      # 采购凭证(红票)
+      "skill_summary": {"enabled": false, "count": 200},   # 技巧概要·卷3
+  },
   "daily": {"enabled": false, "time": "08:00"},     # 每日定时执行
   "last_daily_run": ""                              # 上次定时执行日期(YYYY-MM-DD)
 }
@@ -58,6 +64,8 @@ DEFAULT_SETTINGS: Dict = {
         "combat": True,
         "credit": True,
         "reward": True,
+        # 库存保持默认不勾选: 需在控制台勾选后才能勾选具体保持项并参与规划
+        "inventory": False,
     },
     "fight": {
         "stage": "",            # 关卡, 留空=识别当前/上次
@@ -91,6 +99,16 @@ DEFAULT_SETTINGS: Dict = {
     },
     "signin": {
         "enabled": True,        # 一键长草运行前先执行网易云游戏签到
+    },
+    "inventory": {
+        # 库存保持(对齐 MAA GUI「仓库维持」的简化版):
+        # 勾选后, 运行到该任务时先扫描仓库(Depot 任务), 按缺口规划一次理智作战补货。
+        # count 为目标持有数量, 每种物品独立计算缺口; 保持项与关卡映射见
+        # maa_coordinator.INVENTORY_PRESETS(原地硬编码, 均为固定资源关卡)。
+        "chip_low": {"enabled": False, "count": 20},       # 低级芯片(全职业, 8 职业各 count 个)
+        "chip_high": {"enabled": False, "count": 20},      # 高级芯片组(全职业)
+        "certificate": {"enabled": False, "count": 20},    # 采购凭证(红票, AP-5)
+        "skill_summary": {"enabled": False, "count": 200}, # 技巧概要·卷3(CA-5)
     },
     "award": {
         # 领取奖励细分项(对应 Award 任务参数, 默认与抓图配置一致全勾选)

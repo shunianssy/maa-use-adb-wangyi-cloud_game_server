@@ -68,6 +68,30 @@ class TestMaaSettings(unittest.TestCase):
         infra["facility"].append("Bogus")
         self.assertNotIn("Bogus", default_settings()["infrast"]["facility"])
 
+    def test_inventory_defaults(self):
+        # 库存保持默认: 任务开关关闭, 4 个保持项均未勾选(预设目标数量)
+        s = default_settings()
+        self.assertIn("inventory", s)
+        self.assertFalse(s["tasks"]["inventory"])
+        inv = s["inventory"]
+        self.assertEqual(set(inv), {"chip_low", "chip_high", "certificate", "skill_summary"})
+        for key, count in (("chip_low", 20), ("chip_high", 20),
+                           ("certificate", 20), ("skill_summary", 200)):
+            self.assertFalse(inv[key]["enabled"], key)
+            self.assertEqual(inv[key]["count"], count, key)
+
+    def test_inventory_persisted(self):
+        # 保持项需可落盘并重新载入(部分覆盖时其余字段保持默认)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "maa_settings.json")
+            ms = MaaSettings(path)
+            ms.update({"inventory": {"chip_low": {"enabled": True, "count": 30}}})
+            data = MaaSettings(path).get()["inventory"]
+            self.assertTrue(data["chip_low"]["enabled"])
+            self.assertEqual(data["chip_low"]["count"], 30)
+            self.assertFalse(data["chip_high"]["enabled"])
+            self.assertEqual(data["skill_summary"]["count"], 200)
+
     def test_infrast_persisted(self):
         # 基建设置需可落盘并重新载入(含设施列表整体替换)
         with tempfile.TemporaryDirectory() as tmp:

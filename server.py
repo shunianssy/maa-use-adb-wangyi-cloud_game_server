@@ -339,10 +339,14 @@ async def handle_click(request: web.Request):
 async def do_swipe(start_x, start_y, end_x, end_y, swipe_duration):
     """执行一次滑动; 返回 (ok, err_msg)。HTTP 与 WebSocket 共用。
 
+    协议要点(与点击命令 pack_message 的 mm/cm 一致):
+    - 触摸事件命令格式: "事件码 X Y 触点ID"(press=1 / drag=2 / release=3);
+    - 坐标必须为**原始像素值** —— 云游戏服务端按像素解析, 若传 0-65535 归一化
+      坐标(超出屏幕范围)会导致滑动完全无效(画面无任何反应)。
+
     性能说明: 滑动被拆成若干触摸点, 逐点经 send_action 发送。曾因
     send_action 每条命令都等 PONG 导致高延迟网络下整条命令卡死;
-    现在逐点使用 wait_pong=False(只发不等), 并限制点数上限, 且越界
-    长时间未收到 PONG 也不会阻塞。
+    现在逐点使用 wait_pong=False(只发不等), 并限制点数上限。
     """
     if not app_state.is_ready or not app_state.sock:
         return False, "Service not ready"
@@ -359,25 +363,15 @@ async def do_swipe(start_x, start_y, end_x, end_y, swipe_duration):
 
     logging.warning(f"Action: Swipe from ({start_x}, {start_y}) to ({end_x}, {end_y}) in {swipe_duration}ms")
 
-    def normalize_coord(pixel_val: int, dimension: int) -> int:
-        """Normalize pixel coordinate to 0-65535 range"""
-        clamped = max(0, min(pixel_val, dimension - 1))
-        return int((65535 * clamped) // dimension)
-
-    screen_width = app_state.width
-    screen_height = app_state.height
-
     # 控制触摸点数量: 既保证轨迹平滑, 又避免命令过多堆积(上限 24 点)
     num_points = min(24, max(5, swipe_duration // 40))
     interval = swipe_duration / 1000.0 / num_points
     touch_id = 0
 
     def create_touch_cmd(evt_type: int, px: int, py: int, tid: int) -> dict:
-        """Create touch input command with normalized coordinates"""
-        norm_x = normalize_coord(px, screen_width)
-        norm_y = normalize_coord(py, screen_height)
+        """构造触摸事件命令: 坐标为原始像素值(与点击一致, 见函数 docstring)。"""
         timestamp = str(int(time.time() * 1000))
-        cmd_str = f"{evt_type} {norm_x} {norm_y} {tid}"
+        cmd_str = f"{evt_type} {px} {py} {tid}"
         return {"id": timestamp, "op": "input", "data": {"cmd": cmd_str}}
 
     try:
@@ -675,6 +669,7 @@ async def handle_maa_start(request: web.Request):
     - options.annihilation: {auto, times}
     - options.infrast: 基建设置(mode/facility/drones/threshold/...)
     - options.award: 领取奖励细分项
+    - options.inventory: 库存保持(保持项 enabled/count; 扫描仓库后按缺口规划理智作战)
     未提供的选项回落到已保存设置(maa_settings.json)。
     """
     try:
@@ -714,6 +709,8 @@ async def handle_maa_start(request: web.Request):
         "infrast": {**saved["infrast"], **(options.get("infrast") or {})},
         "signin": {**saved["signin"], **(options.get("signin") or {})},
         "award": {**saved["award"], **(options.get("award") or {})},
+        # 库存保持: 前端每次提交全量保持项(每项 enabled/count), 外层键级覆盖即可
+        "inventory": {**saved.get("inventory", {}), **(options.get("inventory") or {})},
     }
 
     do_signin = bool(merged.get("signin", {}).get("enabled", False))
@@ -814,7 +811,9 @@ async def _run_daily_flow(trigger: str) -> tuple:
         return False, "未启用任何任务"
 
     opts = {"fight": cfg["fight"], "annihilation": cfg["annihilation"],
-            "infrast": cfg["infrast"], "award": cfg["award"]}
+            "infrast": cfg["infrast"], "award": cfg["award"],
+            # 库存保持: 定时执行同样按已保存的保持项规划(扫描仓库 -> 补缺口)
+            "inventory": cfg.get("inventory") or {}}
     do_signin = bool((cfg.get("signin") or {}).get("enabled", False))
     started = _get_coord().start(enabled, options=opts, signin=do_signin,
                                  token=app_state.token or read_token(TOKEN_FILE))

@@ -272,7 +272,15 @@
 
   /* ---------- 一键长草(MAA) ---------- */
   const MAA_TASKS = [
-    "awaken", "recruit", "infrast", "combat", "credit", "reward",
+    "awaken", "recruit", "infrast", "combat", "inventory", "credit", "reward",
+  ];
+  /* 库存保持项: key 与后端 maa_coordinator.INVENTORY_PRESETS 一一对应;
+     数组顺序即规划优先级(低级芯片 → 高级芯片组 → 采购凭证 → 技巧概要) */
+  const INVENTORY_ITEMS = [
+    { key: "chip_low", id: "invChipLow", countId: "invChipLowCount", defaultCount: 20 },
+    { key: "chip_high", id: "invChipHigh", countId: "invChipHighCount", defaultCount: 20 },
+    { key: "certificate", id: "invCertificate", countId: "invCertificateCount", defaultCount: 20 },
+    { key: "skill_summary", id: "invSkillSummary", countId: "invSkillSummaryCount", defaultCount: 200 },
   ];
   // 换班模式说明(MAA Infrast.mode: 0=常规 / 10000=自定义基建 / 20000=队列轮换)
   const INFRAST_MODE_NOTES = {
@@ -430,7 +438,46 @@
     if (els.infrastModeNote) els.infrastModeNote.textContent = INFRAST_MODE_NOTES[mode] || "";
   }
 
-  /* 从表单收集本次运行的选项 fight/annihilation/infrast/award/signin */
+  /* ---------- 库存保持 ---------- */
+
+  /* 收集库存保持设置(每项: enabled + 目标数量; 数量非法时回退该保持项默认值) */
+  function collectInventory() {
+    const out = {};
+    INVENTORY_ITEMS.forEach(({ key, id, countId, defaultCount }) => {
+      const box = els[id];
+      const num = parseInt((els[countId] && els[countId].value) || "", 10);
+      out[key] = {
+        enabled: !!(box && box.checked),
+        count: Number.isFinite(num) && num > 0 ? Math.min(9999, num) : defaultCount,
+      };
+    });
+    return out;
+  }
+
+  /* 回填已保存的库存保持设置 */
+  function applyInventory(inv) {
+    const data = inv || {};
+    INVENTORY_ITEMS.forEach(({ key, id, countId, defaultCount }) => {
+      const conf = data[key] || {};
+      if (els[id]) els[id].checked = !!conf.enabled;
+      if (els[countId]) {
+        els[countId].value = conf.count != null ? conf.count : defaultCount;
+      }
+    });
+  }
+
+  /* 库存保持设置联动: 仅勾选「库存保持」任务开关后可编辑 */
+  function syncInventoryStates() {
+    const on = !!(els.taskToggle && els.taskToggle.inventory &&
+      els.taskToggle.inventory.checked);
+    if (els.inventoryOptions) {
+      els.inventoryOptions.querySelectorAll("input").forEach((el) => {
+        el.disabled = !on;
+      });
+    }
+  }
+
+  /* 从表单收集本次运行的选项 fight/annihilation/infrast/award/inventory/signin */
   function collectRunOptions() {
     const medSel = (els.medicineSel && els.medicineSel.value) || "auto";
     let medicine = 0, medicineMode = "off";
@@ -452,6 +499,7 @@
       },
       infrast: collectInfrast(),
       signin: { enabled: !!(els.signinEnabled && els.signinEnabled.checked) },
+      inventory: collectInventory(),
       award: {
         award: !!(els.awardAward && els.awardAward.checked),
         mail: !!(els.awardMail && els.awardMail.checked),
@@ -463,7 +511,7 @@
     };
   }
 
-  /* 收集设置 patch: tasks 开关 / fight / annihilation / infrast / signin / award / daily */
+  /* 收集设置 patch: tasks 开关 / fight / annihilation / infrast / signin / award / inventory / daily */
   function collectSettingsPatch() {
     const opts = collectRunOptions();
     const tasks = {};
@@ -480,6 +528,7 @@
       },
       infrast: opts.infrast,
       signin: opts.signin,
+      inventory: opts.inventory,
       award: opts.award,
       daily: {
         enabled: !!(els.dailyEnabled && els.dailyEnabled.checked),
@@ -515,6 +564,8 @@
     if (els.signinEnabled) els.signinEnabled.checked = !!((s.signin || {}).enabled);
     // 基建设置(换班模式/设施/无人机/阈值等)
     applyInfrast(s.infrast);
+    // 库存保持(保持项开关与目标数量)
+    applyInventory(s.inventory);
     // 领取奖励细分项
     const aw = s.award || {};
     [["awardAward", "award"], ["awardMail", "mail"], ["awardRecruit", "recruit"],
@@ -555,6 +606,8 @@
     }
     // 基建设置: 依赖「基建换班」开关与换班模式
     syncInfrastStates();
+    // 库存保持: 依赖「库存保持」开关
+    syncInventoryStates();
   }
 
   /* 设置自动保存(防抖 800ms), patch 为空时保存全部表单 */
@@ -694,6 +747,13 @@
       // 展示日志落盘路径(便于远端下载/调试)
       if (els.maaLogPath && s.log_path) {
         els.maaLogPath.textContent = "日志: " + s.log_path;
+      }
+      // 库存保持规划结果: 显示"下一次理智作战打什么/哪一关"
+      if (els.inventoryPlan) {
+        const p = s.inventory_plan;
+        els.inventoryPlan.textContent = p
+          ? `下次理智作战: ${p.stage} · ${p.item_name} 缺 ${p.gap} (现有 ${p.have}/目标 ${p.target})`
+          : "下次理智作战: —";
       }
       if (s.state === "running") {
         setMaaStatus("running");
@@ -958,6 +1018,13 @@
     els.infrastReceptionBoard = $("infrastReceptionBoard");
     els.infrastReceptionExchange = $("infrastReceptionExchange");
     els.infrastReceptionSend = $("infrastReceptionSend");
+    // 库存保持控件(保持项复选框 + 目标数量输入, 顺序与后端 INVENTORY_PRESETS 一致)
+    els.inventoryOptions = $("inventoryOptions");
+    els.inventoryPlan = $("inventoryPlan");
+    INVENTORY_ITEMS.forEach(({ id, countId }) => {
+      els[id] = $(id);
+      els[countId] = $(countId);
+    });
     // 云游戏账号登录控件
     els.loginStatus = $("loginStatus");
     els.loginNote = $("loginNote");
@@ -1002,6 +1069,10 @@
       "infrastDormTrust", "infrastDormNotStationed",
       "infrastReceptionBoard", "infrastReceptionExchange",
       "infrastReceptionSend",
+      // 库存保持: 保持项开关与目标数量(改动即自动保存)
+      "invChipLow", "invChipLowCount", "invChipHigh", "invChipHighCount",
+      "invCertificate", "invCertificateCount",
+      "invSkillSummary", "invSkillSummaryCount",
       "dailyEnabled", "dailyTime",
     ];
     formEls.forEach((id) => {

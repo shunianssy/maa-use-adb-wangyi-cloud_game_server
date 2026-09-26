@@ -42,11 +42,77 @@ FIGHT_TIMES_AUTO = 999
 # 单个任务内子任务出错次数上限: 达到后跳过该任务并继续执行后续任务(避免整轮卡死)
 MAX_SUB_TASK_ERRORS = 5
 
+# ---- 库存保持(对齐 MAA GUI「仓库维持」; 物品 ID 与关卡已对照官方资源文件核对) ----
+# 每个保持项 = 中文名 + 默认目标数量 + 关卡列表(每关列出该关可掉落的目标物品)。
+# 芯片本每关固定掉落两种职业的芯片, 其余为单一物品资源关; 规划时逐关卡计算缺口,
+# 同一关卡取缺口最大的目标物品作为理智作战的掉落停止目标(Fight.drops)。
+# open_days: 关卡开放日(ISO 星期: 1=周一 ... 7=周日), 数据来源为 PRTS 关卡一览
+#   「资源收集」(2026-09 核对): 资源关按星期轮换, 非开放日进不去(导航会失败),
+#   规划时直接跳过。
+INVENTORY_PRESETS = {
+    "chip_low": {
+        "label": "低级芯片(全职业)",
+        "default_count": 20,
+        "stages": [
+            # 固若金汤: 重装/医疗(周一四五日)
+            {"stage": "PR-A-1", "open_days": [1, 4, 5, 7],
+             "items": [("3231", "重装芯片"), ("3261", "医疗芯片")]},
+            # 摧枯拉朽: 狙击/术师(周一二五六)
+            {"stage": "PR-B-1", "open_days": [1, 2, 5, 6],
+             "items": [("3241", "狙击芯片"), ("3251", "术师芯片")]},
+            # 势不可挡: 先锋/辅助(周三四六日)
+            {"stage": "PR-C-1", "open_days": [3, 4, 6, 7],
+             "items": [("3211", "先锋芯片"), ("3271", "辅助芯片")]},
+            # 身先士卒: 近卫/特种(周二三六日)
+            {"stage": "PR-D-1", "open_days": [2, 3, 6, 7],
+             "items": [("3221", "近卫芯片"), ("3281", "特种芯片")]},
+        ],
+    },
+    "chip_high": {
+        "label": "高级芯片组(全职业)",
+        "default_count": 20,
+        "stages": [
+            {"stage": "PR-A-2", "open_days": [1, 4, 5, 7],
+             "items": [("3232", "重装芯片组"), ("3262", "医疗芯片组")]},
+            {"stage": "PR-B-2", "open_days": [1, 2, 5, 6],
+             "items": [("3242", "狙击芯片组"), ("3252", "术师芯片组")]},
+            {"stage": "PR-C-2", "open_days": [3, 4, 6, 7],
+             "items": [("3212", "先锋芯片组"), ("3272", "辅助芯片组")]},
+            {"stage": "PR-D-2", "open_days": [2, 3, 6, 7],
+             "items": [("3222", "近卫芯片组"), ("3282", "特种芯片组")]},
+        ],
+    },
+    "certificate": {
+        "label": "采购凭证(红票)",
+        "default_count": 20,
+        # 粉碎防御: 周一四六日
+        "stages": [{"stage": "AP-5", "open_days": [1, 4, 6, 7],
+                    "items": [("4006", "采购凭证")]}],
+    },
+    "skill_summary": {
+        "label": "技巧概要·卷3",
+        "default_count": 200,
+        # 空中威胁: 周二三五日
+        "stages": [{"stage": "CA-5", "open_days": [2, 3, 5, 7],
+                    "items": [("3303", "技巧概要·卷3")]}],
+    },
+}
+
+# 库存保持项的规划顺序(与 WebUI 勾选区从上到下的顺序一致)
+INVENTORY_ORDER = ["chip_low", "chip_high", "certificate", "skill_summary"]
+
+# 星期中文名(ISO: 1=周一 ... 7=周日), 用于"下次开放"日志提示
+_WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+# 仓库识别等待上限(秒): 仓库物品多需滑动多屏识别, 超时后跳过库存保持并继续后续任务
+DEPOT_TIMEOUT = 360.0
+
 
 # 每日任务 key -> MaaCore 任务类型(AsstAppendTask 的第一个参数)
-# 注意: "库存保持"(DepotMaintain)在官方集成文档中是 UI 层功能, MaaCore 协议层
-#       没有名为 Hog 的任务类型; 此处用官方支持的 Depot(仓库识别)近似承接,
-#       保证 AppendTask 不会因类型非法而失败。
+# 注意: "库存保持"是 UI 层组合功能(对齐 MAA GUI「仓库维持」): 先执行 Depot
+#       (仓库识别)获取库存快照, 再按缺口追加 Fight 任务补货, 因此该 key 不走
+#       常规任务路径(_run_inventory 特判); 此处的 "Depot" 仅作日志展示, 标明
+#       该任务的第一步是仓库识别。
 # "annihilation" 为每周剿灭: 复用 Fight 任务并指定 stage=Annihilation,
 #       MaaCore 会在合成玉达本周上限后自动停止代理速刷。
 DEFAULT_TASK_MAP = {
@@ -55,17 +121,18 @@ DEFAULT_TASK_MAP = {
     "infrast": "Infrast",         # 基建换班
     "combat": "Fight",            # 理智作战
     "annihilation": "Fight",      # 每周剿灭(代理速刷)
-    "inventory": "Depot",         # 库存保持(协议层用仓库识别替代)
+    "inventory": "Depot",         # 库存保持(组合任务: 仓库识别 + 理智作战补缺口)
     "credit": "Mall",             # 信用收支
     "reward": "Award",            # 领取奖励
 }
 
-# 优先顺序: 因果依赖前置(先唤醒 → 剿灭 → 理智作战 ...)
+# 优先顺序: 因果依赖前置(先唤醒 → 领取奖励 → 剿灭 → 库存保持 → 理智作战 ...)
 # 剿灭放在理智作战之前, 保证先清掉本周剿灭再刷普通关;
-# 当前剿灭合成玉已满时 MAA 会自动跳过, 不影响后续任务。
+# 库存保持放在剿灭之后、理智作战之前(优先级: 每周剿灭 > 库存保持 > 理智作战配置):
+# 勾选后先按仓库缺口规划并刷关, 剩余理智再由理智作战按用户配置的关卡消耗。
 TASK_EXEC_ORDER = [
-    "awaken", "reward", "recruit", "infrast", "annihilation", "combat",
-    "credit", "inventory",
+    "awaken", "reward", "recruit", "infrast", "annihilation", "inventory", "combat",
+    "credit",
 ]
 
 # 任务 key -> 中文展示名(日志/状态栏使用)
@@ -243,7 +310,8 @@ def build_task_params(task_key: str, task_type: str, options: Optional[dict] = N
         task_type: MaaCore 任务类型(StartUp/Fight/...)
         options: 设置面板透传的运行选项, 取
                  {"fight": {...}, "annihilation": {...},
-                  "infrast": {...}, "award": {...}}
+                  "infrast": {...}, "award": {...}, "inventory": {...}}
+                 其中 inventory 由 _run_inventory 使用(本函数不读取)。
 
     Returns:
         合法 JSON 字符串, 传给 AsstAppendTask。
@@ -328,6 +396,155 @@ def build_task_params(task_key: str, task_type: str, options: Optional[dict] = N
     return json.dumps(params, ensure_ascii=False)
 
 
+# ---------------------------------------------------------------------- #
+# 库存保持: 缺口计算与规划(纯函数, 便于单元测试)                            #
+# ---------------------------------------------------------------------- #
+def _resolve_inventory_count(raw, default: int) -> int:
+    """规整保持项目标库存数量: 正整数, 非法值回退默认(上限 99999 防脏数据)。"""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(99999, value))
+
+
+def _today_weekday() -> int:
+    """返回今天的 ISO 星期(1=周一 ... 7=周日), 供资源关卡开放日判断。
+
+    单独抽成函数便于单元测试注入固定星期(真实运行取系统日期)。
+    """
+    return datetime.date.today().isoweekday()
+
+
+def next_open_weekday(open_days: List[int], weekday: int) -> Optional[int]:
+    """返回 open_days 中 weekday 之后最近的一个开放日(ISO 星期, 不含当天)。
+
+    Args:
+        open_days: 关卡开放日列表(1=周一 ... 7=周日)
+        weekday: 当前星期
+
+    Returns:
+        下一个开放日的 ISO 星期; 列表为空/无可用项时返回 None。
+    """
+    for offset in range(1, 8):
+        day = (weekday - 1 + offset) % 7 + 1
+        if day in open_days:
+            return day
+    return None
+
+
+def inventory_gaps(depot: Optional[dict], inventory_opt: Optional[dict],
+                   weekday: Optional[int] = None,
+                   include_closed: bool = False) -> List[Dict]:
+    """按保持项逐关卡计算库存缺口, 返回需要刷取的计划列表(顺序即优先级)。
+
+    Args:
+        depot: 仓库识别结果 {物品ID: 数量}(由 DepotInfo 回调解析所得)
+        inventory_opt: 库存保持设置 {保持项key: {"enabled": bool, "count": int}}
+        weekday: 星期几(ISO: 1=周一 ... 7=周日), 默认取当天。
+                 资源关卡按开放日轮换(如芯片本), 非开放日不列入计划 ——
+                 否则 MAA 导航到未开放关卡会一直滑动找不到而卡住。
+        include_closed: True 时忽略开放日限制(仅用于"今日不开放"的缺口提示)
+
+    Returns:
+        缺口计划列表, 每项含:
+        {"key","label","stage","item_id","item_name","have","target","gap","open_days"};
+        未勾选/已达标的保持项与关卡不返回; 同一关卡掉落多种目标物品时,
+        取缺口最大的那个(缺口相同按预设顺序), 保证 drops 停止条件单一明确。
+    """
+    depot = depot or {}
+    opt = inventory_opt or {}
+    day = _today_weekday() if weekday is None else int(weekday)
+    plans: List[Dict] = []
+    for key in INVENTORY_ORDER:
+        preset = INVENTORY_PRESETS.get(key)
+        if not preset:
+            continue
+        conf = opt.get(key)
+        if not isinstance(conf, dict) or not conf.get("enabled"):
+            continue   # 未勾选的保持项不参与规划
+        target = _resolve_inventory_count(conf.get("count"), preset["default_count"])
+        for stage_conf in preset["stages"]:
+            open_days = list(stage_conf.get("open_days") or [])
+            if not include_closed and open_days and day not in open_days:
+                continue   # 该关卡今日不开放, 跳过(避免导航失败)
+            # 该关卡目标物品的缺口(库存不足为正数; 识别缺失/非法值视为 0)
+            candidates: List[Dict] = []
+            for item_id, item_name in stage_conf["items"]:
+                try:
+                    have = int(depot.get(item_id, 0) or 0)
+                except (TypeError, ValueError):
+                    have = 0
+                gap = target - have
+                if gap > 0:
+                    candidates.append({
+                        "item_id": item_id, "item_name": item_name,
+                        "have": have, "gap": gap,
+                    })
+            if not candidates:
+                continue   # 该关卡目标物品全部达标
+            best = max(candidates, key=lambda c: c["gap"])
+            plans.append({
+                "key": key,
+                "label": preset["label"],
+                "stage": stage_conf["stage"],
+                "item_id": best["item_id"],
+                "item_name": best["item_name"],
+                "have": best["have"],
+                "target": target,
+                "gap": best["gap"],
+                "open_days": open_days,
+            })
+    return plans
+
+
+def plan_inventory(depot: Optional[dict], inventory_opt: Optional[dict],
+                   weekday: Optional[int] = None) -> Optional[Dict]:
+    """规划下一次理智作战: 返回第一个缺口计划(按保持项顺序), 无则返回 None。
+
+    说明: 资源关卡按开放日轮换(芯片本/AP-5/CA-5), 非开放日的关卡会被跳过,
+    因此"有缺口但今日全部不开放"时返回 None(由调用方提示)。
+    """
+    plans = inventory_gaps(depot, inventory_opt, weekday=weekday)
+    return plans[0] if plans else None
+
+
+def build_inventory_fight_params(plan: Dict, fight_opt: Optional[dict] = None) -> str:
+    """构造库存保持的理智作战参数(指定关卡 + 掉落停止条件)。
+
+    Args:
+        plan: inventory_gaps/plan_inventory 产出的计划项
+        fight_opt: 「作战设置」的理智药配置(库存保持沿用同一份设置)
+
+    Returns:
+        合法 JSON 字符串, 传给 AsstAppendTask("Fight", params)。
+
+    说明(字段对齐官方集成文档 Fight):
+    - stage: 规划出的固定资源关卡(芯片本/AP-5/CA-5);
+    - times: 固定 auto(大次数) —— 补货战斗由 drops 达标或理智耗尽自然结束;
+    - drops: {目标物品ID: 缺口数量} —— MaaCore 按「本次任务累计掉落数」停止
+             (Farm 语义), 等价于把库存补到目标值(UI 层 Target Inventory 的
+             协议层实现方式);
+    - medicine: 沿用作战设置的理智药策略, 保证补货可正常消耗理智药。
+    """
+    item_id = str(plan.get("item_id", "") or "")
+    try:
+        gap = max(1, int(plan.get("gap", 1) or 1))
+    except (TypeError, ValueError):
+        gap = 1
+    params: Dict = {
+        "stage": str(plan.get("stage", "") or ""),
+        "medicine": _resolve_medicine(fight_opt or {}),
+        "stone": 0,                       # 不碎石(库存保持只消耗理智与理智药)
+        "times": FIGHT_TIMES_AUTO,        # 次数 auto: 刷够缺口或理智耗尽即停
+        "series": 0,                      # 代理倍率恒为 AUTO
+        "client_type": "Official",        # 崩溃后自动重连回游戏继续刷
+    }
+    if item_id:
+        params["drops"] = {item_id: gap}
+    return json.dumps(params, ensure_ascii=False)
+
+
 class _TaskOutcome(NamedTuple):
     """单个任务的执行结果(_wait_task 返回给主流程)。
 
@@ -362,6 +579,7 @@ class TaskStatus:
         self._max_log_lines = 100        # 日志行数上限, 防止无限增长
         self._log_path: Optional[str] = None   # 本次运行落盘日志文件路径
         self._log_file = None            # 打开的日志文件句柄(整个运行周期保持)
+        self._inventory_plan: Optional[Dict] = None   # 库存保持规划结果(供 WebUI 展示)
 
     # ---- 写(协调器线程) ----
     def start_run(self, tasks: List[str], labels: Optional[List[str]] = None) -> None:
@@ -377,6 +595,7 @@ class TaskStatus:
             self._finished = []
             self._total = list(tasks)
             self._error = ""
+            self._inventory_plan = None   # 每轮运行复位, 由库存保持任务重新规划
             self._log = ["开始执行, 任务序列: " + ", ".join(labels or tasks)]
             self._open_log_file()
 
@@ -452,6 +671,16 @@ class TaskStatus:
                 self._log.append(f"任务 {task} 失败: {msg}")
                 self._write_file(f"任务 {task} 失败: {msg}")
 
+    def set_inventory_plan(self, plan: Optional[Dict]) -> None:
+        """记录库存保持的规划结果(供 WebUI 显示"下一次打什么/哪一关")。
+
+        Args:
+            plan: inventory_gaps/plan_inventory 产出的计划项;
+                  None 表示库存充足或未规划(前端据此展示占位符)。
+        """
+        with self._lock:
+            self._inventory_plan = dict(plan) if plan else None
+
     def set_final(self, state: str, message: str = "") -> None:
         with self._lock:
             self._state = state
@@ -474,6 +703,7 @@ class TaskStatus:
                 "error": self._error,
                 "log": list(self._log),
                 "log_path": self._log_path,
+                "inventory_plan": dict(self._inventory_plan) if self._inventory_plan else None,
             }
 
     @property
@@ -504,6 +734,11 @@ class MaaCoordinator:
         self._sub_error_count = 0
         self._skip_flag = threading.Event()         # 子任务出错超限 -> 跳过当前任务
         self._chain_outcome: Dict[str, str] = {}    # 当前任务链最终状态(回调写入)
+
+        # 库存保持: 仓库识别结果由 DepotInfo 回调在 MaaCore 线程写入, 加锁保护
+        self._depot_lock = threading.Lock()
+        self._depot_data: Dict[str, int] = {}       # {物品ID: 数量}
+        self._depot_done = threading.Event()        # 识别完成(done=true)标志
 
     @property
     def running(self) -> bool:
@@ -555,6 +790,8 @@ class MaaCoordinator:
 
         进度与错误通过 self.status 上报给 WebUI 轮询; 全部日志自动落盘到
         logs/maa_*.log(由 TaskStatus.start_run 打开)。
+        库存保持(inventory)为组合任务, 在任务循环内特判执行(见 _run_inventory),
+        不走 build_task_params 的常规参数构造路径。
         """
         self.status.start_run(
             tasks, [task_display_name(t, DEFAULT_TASK_MAP.get(t, t)) for t in tasks])
@@ -589,6 +826,17 @@ class MaaCoordinator:
             stopped_all = False
             skipped: List[str] = []
             for task in tasks:
+                # 库存保持是组合任务(仓库识别 + 缺口规划 + 理智作战), 走独立流程
+                if task == "inventory":
+                    outcome = self._run_inventory(assist)
+                    if outcome.stopped_all:
+                        stopped_all = True
+                        break
+                    self.status.mark_done(task, outcome.ok, outcome.message)
+                    if outcome.skipped:
+                        skipped.append(task)
+                    continue
+
                 task_type = DEFAULT_TASK_MAP.get(task, task)
                 label = task_display_name(task, task_type)
                 params = build_task_params(task, task_type, self._options)
@@ -690,6 +938,204 @@ class MaaCoordinator:
         while assist.running() and time.monotonic() < deadline:
             time.sleep(0.5)
 
+    # ------------------------------------------------------------------ #
+    # 库存保持(仓库识别 -> 缺口规划 -> 理智作战补货)                        #
+    # ------------------------------------------------------------------ #
+    def _run_inventory(self, assist) -> _TaskOutcome:
+        """库存保持: 扫描仓库 -> 规划缺口 -> 用理智作战补货(对齐 MAA GUI「仓库维持」)。
+
+        流程:
+          1. 追加并执行 Depot(仓库识别)任务, 等待 DepotInfo 回调返回库存数据
+             (识别中 done=false 的渐进数据同样累计; 停止/跳过/超时均有保护);
+          2. 按 INVENTORY_PRESETS 逐关卡计算缺口, 取第一个缺口计划写入状态
+             (WebUI 据此展示"下一次打什么/哪一关");
+          3. 有缺口时追加理智作战(指定关卡 + drops 缺口数量 + 次数 auto),
+             复用 _wait_task 等待结束(子任务出错超限跳过逻辑与普通任务一致)。
+
+        失败不阻断: 未勾选保持项/识别失败或超时/库存充足时记录日志并跳过,
+        继续执行后续任务。
+
+        Args:
+            assist: MaaCoreAssistant 实例
+
+        Returns:
+            _TaskOutcome: stopped_all 为 True 时主流程应结束整轮。
+        """
+        inv_opt = self._options.get("inventory") or {}
+        if not any(isinstance(v, dict) and v.get("enabled") for v in inv_opt.values()):
+            self.status.log("库存保持: 未勾选任何保持项, 跳过")
+            return _TaskOutcome(ok=True, message="未勾选保持项")
+
+        # 1) 仓库识别: 复位回调数据后执行 Depot 任务
+        self._reset_error_tracking()
+        with self._depot_lock:
+            self._depot_data = {}
+        self._depot_done.clear()
+        self._current_key, self._current_type = "inventory", "Depot"
+        self.status.set_current("库存保持(仓库识别)")
+        self.status.log("库存保持: 正在扫描仓库...")
+        try:
+            tid = assist.append_task("Depot", "{}")
+            self.status.log(
+                f"追加任务成功: {task_display_name('inventory', 'Depot')} (task_id={tid})")
+            assist.start()
+        except Exception as e:
+            logger.error("[库存保持] 仓库识别启动失败(跳过): %s", e)
+            self.status.log(f"库存保持: 仓库识别启动失败, 已跳过: {e}")
+            return _TaskOutcome(ok=False, message=f"仓库识别失败: {e}")
+
+        early = self._wait_depot(assist)
+        if early is not None:
+            return early   # 停止请求/子任务出错跳过等提前结束情形
+
+        with self._depot_lock:
+            depot = dict(self._depot_data)
+        if not depot:
+            why = self._chain_outcome.get("why") or "未返回识别数据"
+            self.status.log(f"库存保持: 仓库识别失败({why}), 跳过理智作战")
+            return _TaskOutcome(ok=False, message=f"仓库识别失败: {why}")
+        if not self._depot_done.is_set():
+            self.status.log("库存保持: 未收到识别完成标记, 使用已识别到的数据继续")
+
+        # 2) 规划缺口: 第一个缺口计划即"下一次理智作战", 写入状态供 WebUI 展示。
+        #    资源关卡按开放日轮换(芯片本/AP-5/CA-5), 非开放日自动跳过。
+        plan = plan_inventory(depot, inv_opt)
+        self.status.set_inventory_plan(plan)
+        if not plan:
+            # 无计划有两种原因: 全部达标 / 有缺口但对应关卡今日不开放
+            closed = inventory_gaps(depot, inv_opt, include_closed=True)
+            if closed:
+                self._log_closed_gaps(closed)
+                return _TaskOutcome(ok=True, message="关卡今日不开放")
+            self.status.log("库存保持: 所有保持项均已达标, 无需理智作战")
+            return _TaskOutcome(ok=True, message="库存充足")
+        gaps = inventory_gaps(depot, inv_opt)
+        if len(gaps) > 1:
+            others = ", ".join(f"{g['stage']}/{g['item_name']}" for g in gaps[1:4])
+            suffix = " 等" if len(gaps) > 4 else ""
+            self.status.log(
+                f"库存保持: 另有 {len(gaps) - 1} 项缺口({others}{suffix})待后续运行补")
+        self.status.log(
+            f"库存保持: 规划理智作战 -> {plan['stage']} · {plan['item_name']} "
+            f"缺 {plan['gap']} (现有 {plan['have']}/目标 {plan['target']})")
+
+        # 3) 追加理智作战补货: 指定关卡 + 掉落停止条件(次数 auto)
+        self._reset_error_tracking()
+        self._current_key, self._current_type = "inventory", "Fight"
+        params = build_inventory_fight_params(plan, self._options.get("fight"))
+        label = f"库存保持/{plan['stage']}"
+        logger.info("[一键长草] 追加库存保持战斗 %s params=%s", label, params)
+        try:
+            tid = assist.append_task("Fight", params)
+            self.status.log(f"追加任务成功: {label}(Fight) (task_id={tid})")
+            self.status.set_current(label)
+            assist.start()
+        except Exception as e:
+            logger.error("[库存保持] 追加/启动理智作战失败(跳过): %s", e)
+            self.status.log(f"库存保持: 追加/启动理智作战失败, 已跳过: {e}")
+            return _TaskOutcome(ok=False, message=f"理智作战启动失败: {e}")
+
+        outcome = self._wait_task(assist)
+        if outcome.ok:
+            self.status.log(
+                f"库存保持: {plan['item_name']} 补货结束"
+                f"(缺口 {plan['gap']}, 掉落达标或理智耗尽自动停止)")
+        return outcome
+
+    def _log_closed_gaps(self, closed: List[Dict]) -> None:
+        """输出"有缺口但今日不开放"的日志, 并提示各关卡最近的下次开放日。
+
+        Args:
+            closed: inventory_gaps(include_closed=True) 的结果 —— 调用时机为
+                    "今日可刷计划为空", 因此这里的每一项必然都是今日不开放的关卡。
+        """
+        names = ", ".join(f"{g['stage']}/{g['item_name']}" for g in closed[:3])
+        suffix = " 等" if len(closed) > 3 else ""
+        self.status.log(
+            f"库存保持: 有 {len(closed)} 项缺口, 但对应关卡今日不开放"
+            f"({names}{suffix}), 跳过理智作战")
+        # 逐项提示下次开放日(最多 3 条, 避免日志过长)
+        day = _today_weekday()
+        for gap in closed[:3]:
+            nxt = next_open_weekday(gap.get("open_days") or [], day)
+            if nxt:
+                self.status.log(
+                    f"库存保持: {gap['stage']}({gap['item_name']}) 下次开放: "
+                    f"{_WEEKDAY_NAMES[nxt - 1]}")
+
+    def _wait_depot(self, assist) -> Optional[_TaskOutcome]:
+        """等待仓库识别任务结束, 期间响应停止/跳过/超时保护。
+
+        Args:
+            assist: MaaCoreAssistant 实例
+
+        Returns:
+            None 表示任务正常结束(进入规划流程);
+            非 None 为提前结束的 _TaskOutcome(停止请求 stopped_all / 出错跳过 skipped)。
+        """
+        deadline = time.monotonic() + DEPOT_TIMEOUT
+        while assist.running():
+            if self._stop_flag.is_set():
+                logger.info("收到停止请求, 停止仓库识别")
+                self.status.log("收到停止请求, 正在停止...")
+                assist.stop()
+                self._wait_not_running(assist)
+                return _TaskOutcome(ok=False, message="已手动停止", stopped_all=True)
+            if self._skip_flag.is_set():
+                msg = f"子任务出错达到上限({MAX_SUB_TASK_ERRORS} 次), 跳过该任务"
+                logger.warning("[库存保持] %s", msg)
+                self.status.log(msg)
+                assist.stop()
+                self._wait_not_running(assist)
+                return _TaskOutcome(ok=False, message=msg, skipped=True)
+            if time.monotonic() > deadline:
+                # 超时: 主动停止识别, 尝试使用已累计的数据降级继续
+                self.status.log(
+                    f"仓库识别超时({int(DEPOT_TIMEOUT)} 秒), 已停止识别")
+                assist.stop()
+                self._wait_not_running(assist)
+                break
+            time.sleep(0.5)
+        return None
+
+    def _on_depot_info(self, details: Dict) -> None:
+        """解析 DepotInfo 回调(仓库识别结果), 累计库存数据并标记识别完成。
+
+        Args:
+            details: 回调消息的顶层 details 对象, 其中 details["details"] 为
+                     {"done": bool, "data": JSON 字符串 {"物品ID": 数量}}
+
+        说明: 识别过程中 done=false 也会携带已识别部分(渐进上报), 一并累计;
+              done=true 置完成事件并输出日志, 供 _run_inventory 判定可用性。
+        """
+        inner = details.get("details")
+        if not isinstance(inner, dict):
+            inner = {}
+        raw = inner.get("data")
+        payload = None
+        if isinstance(raw, str) and raw:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as e:
+                logger.warning("DepotInfo data 解析失败: %s", e)
+        elif isinstance(raw, dict):
+            payload = raw   # 兼容直接返回对象(非字符串)的版本差异
+        if isinstance(payload, dict):
+            cleaned: Dict[str, int] = {}
+            for item_id, count in payload.items():
+                try:
+                    cleaned[str(item_id)] = int(count)
+                except (TypeError, ValueError):
+                    continue   # 忽略非数字条目, 防脏数据污染库存表
+            if cleaned:
+                with self._depot_lock:
+                    self._depot_data.update(cleaned)
+        if inner.get("done"):
+            self._depot_done.set()
+            with self._depot_lock:
+                count = len(self._depot_data)
+            self.status.log(f"仓库识别完成: 共 {count} 种物品")
+
     def _do_signin(self) -> None:
         """任务序列前置: 执行网易云游戏签到(失败仅记录, 不阻断一键长草)。"""
         self.status.log("执行网易云游戏签到...")
@@ -716,6 +1162,7 @@ class MaaCoordinator:
         msg 取值对齐官方回调协议(callback-schema):
             TaskChainError=10000  TaskChainStart=10001  TaskChainCompleted=10002
             TaskChainExtraInfo=10003  TaskChainStopped=10004
+            SubTaskExtraInfo=20003(含 DepotInfo 仓库识别结果)
             SubTaskError=20000  AllTasksCompleted=3  ConnectionInfo=2
         """
         try:
@@ -756,6 +1203,11 @@ class MaaCoordinator:
             logger.info("[MaaCore] 任务被停止: %s", chain)
             self.status.log(f"[MaaCore] 任务被停止: {chain}")
             self._chain_outcome = {"state": "stopped", "why": ""}
+        # ---- 子任务额外信息: 仓库识别结果(库存保持的第一步) ----
+        elif msg_id in (20003, 10003) and what == "DepotInfo":
+            # 官方回调: SubTaskExtraInfo(20003) 携带 DepotInfo(done/data),
+            # 兼容 TaskChainExtraInfo(10003) 以防版本差异
+            self._on_depot_info(details)
         # ---- 子任务错误(计数并在超过上限后跳过当前任务) ----
         elif msg_id == 20000:  # SubTaskError
             logger.error("[MaaCore] 子任务出错: %s/%s -> %s", chain, subtask, why)

@@ -88,9 +88,20 @@ class AsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_fake_ws.send_action.call_count, 2)
 
     async def test_swipe_ok(self):
+        _fake_ws.send_action.reset_mock()
         ok, err = await server.do_swipe(100, 100, 300, 300, 500)
         self.assertTrue(ok)
         self.assertIsNone(err)
+        # 触摸事件坐标必须为原始像素(与点击命令一致):
+        # 若传 0-65535 归一化坐标, 云游戏端因坐标越界会忽略滑动(画面无任何反应)
+        cmds = [c.args[1]["data"]["cmd"] for c in _fake_ws.send_action.call_args_list]
+        self.assertTrue(cmds[0].startswith("1 100 100"), cmds[0])    # press 起点
+        self.assertTrue(cmds[-1].startswith("3 300 300"), cmds[-1])  # release 终点
+        for cmd in cmds[1:-1]:
+            self.assertTrue(cmd.startswith("2 "), cmd)               # drag 中间点
+        # 中间点坐标必须落在屏幕像素范围内(归一化后会出现数千的大数值)
+        mid_coords = [int(v) for cmd in cmds[1:-1] for v in cmd.split()[1:3]]
+        self.assertTrue(all(0 <= v <= 1280 for v in mid_coords), mid_coords)
 
     async def test_swipe_rejects_negative_duration(self):
         ok, err = await server.do_swipe(0, 0, 10, 10, -1)

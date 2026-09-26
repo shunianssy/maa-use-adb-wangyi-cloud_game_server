@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>网易云游戏 · MAA 远程控制台</title>
-  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
   <header class="topbar">
@@ -95,6 +95,9 @@
           <label class="task-toggle" data-task="combat">
             <input type="checkbox" checked /><span>理智作战</span>
           </label>
+          <label class="task-toggle" data-task="inventory">
+            <input type="checkbox" /><span>库存保持</span>
+          </label>
           <label class="task-toggle" data-task="credit">
             <input type="checkbox" checked /><span>信用收支</span>
           </label>
@@ -165,6 +168,41 @@
             </label>
             <span class="hint">领取网易云游戏每日奖励时长</span>
           </div>
+        </fieldset>
+
+        <!-- 库存保持: 扫描仓库 -> 按缺口规划理智作战(对齐 MAA「仓库维持」) -->
+        <fieldset class="fight-options" id="inventoryOptions">
+          <legend>库存保持设置</legend>
+          <div class="opt-row">
+            <label class="inline-check">
+              <input type="checkbox" id="invChipLow" /><span>低级芯片(全职业)</span>
+            </label>
+            <input id="invChipLowCount" type="number" min="1" max="9999" value="20"
+                   title="目标持有数量(各职业芯片独立计算缺口)" />
+          </div>
+          <div class="opt-row">
+            <label class="inline-check">
+              <input type="checkbox" id="invChipHigh" /><span>高级芯片组(全职业)</span>
+            </label>
+            <input id="invChipHighCount" type="number" min="1" max="9999" value="20"
+                   title="目标持有数量(各职业芯片组独立计算缺口)" />
+          </div>
+          <div class="opt-row">
+            <label class="inline-check">
+              <input type="checkbox" id="invCertificate" /><span>采购凭证(红票)</span>
+            </label>
+            <input id="invCertificateCount" type="number" min="1" max="9999" value="20"
+                   title="目标持有数量(AP-5)" />
+          </div>
+          <div class="opt-row">
+            <label class="inline-check">
+              <input type="checkbox" id="invSkillSummary" /><span>技巧概要·卷3</span>
+            </label>
+            <input id="invSkillSummaryCount" type="number" min="1" max="9999" value="200"
+                   title="目标持有数量(CA-5)" />
+          </div>
+          <p class="opt-note">勾选后: 「领取奖励」完成 → 扫描仓库 → 按缺口规划理智作战(次数 auto, 刷够缺口或理智耗尽即停); 优先级: 每周剿灭 &gt; 库存保持 &gt; 理智作战</p>
+          <p class="opt-note" id="inventoryPlan">下次理智作战: —</p>
         </fieldset>
 
         <!-- 基建设置: 换班模式(常规/自定义基建/队列轮换) + 设施 + 无人机等 -->
@@ -319,6 +357,6 @@
   </main>
 
   <!-- v= 版本号用于强制刷新静态资源(避免改版后浏览器复用旧缓存) -->
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>
