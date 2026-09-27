@@ -54,6 +54,9 @@ WEBUI_DIR = os.environ.get("NETEASE_WEBUI_DIR", os.path.join(os.path.dirname(__f
 NETEASE_MAA_RESOURCE = os.environ.get("NETEASE_MAA_RESOURCE", os.path.join(os.path.dirname(__file__), "maa_pipeline"))
 # NETEASE_MAA_SETTINGS: 一键长草设置文件路径(含任务开关/作战参数/每日定时等)
 NETEASE_MAA_SETTINGS = os.environ.get("NETEASE_MAA_SETTINGS", os.path.join(os.path.dirname(__file__), "maa_settings.json"))
+# 每日定时流程结束后等待一键长草完成的最长时间(秒): 4 小时, 超时后不再等待
+# (防止异常情况下后台看护协程永久挂起; 正常任务通常远早于此完成)
+DAILY_FLOW_MAX_WAIT = int(os.environ.get("NETEASE_DAILY_FLOW_MAX_WAIT", str(4 * 3600)))
 
 # 一键长草设置实例(启动即加载; 每日定时任务读取它做触发)
 maa_settings = MaaSettings(NETEASE_MAA_SETTINGS)
@@ -782,8 +785,65 @@ async def _wait_game_ready(timeout: float = 90.0) -> bool:
     return False
 
 
+def _cloud_game_owned_by_flow() -> bool:
+    """判断当前云游戏连接是否"空闲"(可被定时流程接管并在结束后断开)。
+
+    返回 True 表示调用前没有进行中的云游戏连接(本次流程将自行启动它),
+    结束后可安全断开以节省云游戏时长/流量; 返回 False 说明用户已手动开着
+    云游戏, 此时不接管、也不在结束后断开, 避免误伤用户会话。
+    """
+    return not (app_state.cloud_game_task and not app_state.cloud_game_task.done())
+
+
+async def _auto_exit_cloud_game(trigger: str, owned: bool, maa_log) -> None:
+    """断开由定时流程自行启动的云游戏连接(节省云游戏时长与流量)。
+
+    Args:
+        trigger: 触发来源描述(仅用于日志)
+        owned: 该连接是否由本次流程启动 —— False(用户手动开启)时不处理
+        maa_log: 一键长草日志(TaskStatus)
+    """
+    if not owned:
+        return
+    # 连接已不存在(用户提前退出等)时无需处理
+    if not (app_state.cloud_game_task and not app_state.cloud_game_task.done()):
+        return
+    maa_log.log(f"{trigger}: 任务已结束, 断开云游戏以节省时长/流量...")
+    logging.info("%s: 自动断开云游戏连接", trigger)
+    await _handle_exit_internal()
+    maa_log.log(f"{trigger}: 云游戏已断开")
+
+
+async def _watch_flow_and_exit_cloud_game(trigger: str, owned: bool, maa_log) -> None:
+    """后台等待一键长草执行结束后断开云游戏(每日定时/测试执行的后置步骤)。
+
+    说明: _run_daily_flow 在任务启动后立即返回, 因此这里轮询协调器线程状态,
+    待其自然结束(或达到最长等待上限)后调用 _auto_exit_cloud_game 释放连接。
+
+    Args:
+        trigger: 触发来源描述
+        owned: 云游戏连接是否由本次流程启动(False 时不做任何处理)
+        maa_log: 一键长草日志(TaskStatus)
+    """
+    if not owned:
+        return   # 用户手动开启的会话不接管
+    coord = _get_coord()
+    deadline = time.monotonic() + DAILY_FLOW_MAX_WAIT
+    while coord.running and time.monotonic() < deadline:
+        await asyncio.sleep(5)
+    if coord.running:
+        # 超时保护: 极端情况下不再等待, 避免后台任务永久挂起(日志留痕便于排查)
+        maa_log.log(f"{trigger}: 等待一键长草结束超时({int(DAILY_FLOW_MAX_WAIT)} 秒), 跳过自动断开云游戏")
+        logging.warning("%s: 等待一键长草结束超时, 跳过自动断开云游戏", trigger)
+        return
+    await _auto_exit_cloud_game(trigger, owned, maa_log)
+
+
 async def _run_daily_flow(trigger: str) -> tuple:
-    """执行一次「启动云游戏 → 一键长草」流程(每日定时与「测试执行」共用)。
+    """执行一次「启动云游戏 → 一键长草 → 结束后断开云游戏」流程。
+
+    每日定时与「测试执行」共用。任务结束后自动断开云游戏以节省时长与流量;
+    仅当云游戏连接由本次流程自行启动时才断开, 避免误断用户手动开启的会话。
 
     Args:
         trigger: 触发来源描述(写入一键长草日志)
@@ -792,6 +852,8 @@ async def _run_daily_flow(trigger: str) -> tuple:
         (ok, message): ok 表示一键长草是否成功启动
     """
     maa_log = _get_coord().status
+    # 启动前先记录连接归属: owned=True 表示由本次流程负责启动并在结束后断开
+    owned = _cloud_game_owned_by_flow()
     maa_log.log(f"{trigger}: 启动云游戏...")
     ok, msg = await _handle_start_internal()
     if not ok:
@@ -799,6 +861,7 @@ async def _run_daily_flow(trigger: str) -> tuple:
         return False, msg
     if not await _wait_game_ready(90):
         maa_log.log(f"{trigger}: 等待云游戏就绪超时")
+        await _auto_exit_cloud_game(trigger, owned, maa_log)  # 就绪失败也要释放连接
         return False, "等待云游戏就绪超时"
 
     cfg = maa_settings.get()
@@ -808,6 +871,7 @@ async def _run_daily_flow(trigger: str) -> tuple:
         enabled.append("annihilation")
     if not enabled:
         maa_log.log(f"{trigger}: 未启用任何任务, 已跳过一键长草")
+        await _auto_exit_cloud_game(trigger, owned, maa_log)
         return False, "未启用任何任务"
 
     opts = {"fight": cfg["fight"], "annihilation": cfg["annihilation"],
@@ -819,9 +883,12 @@ async def _run_daily_flow(trigger: str) -> tuple:
                                  token=app_state.token or read_token(TOKEN_FILE))
     if not started:
         maa_log.log(f"{trigger}: 一键长草启动失败(可能已有任务在运行)")
+        await _auto_exit_cloud_game(trigger, owned, maa_log)
         return False, "一键长草启动失败(可能已有任务在运行)"
     maa_log.log(f"{trigger}: 自动执行一键长草 {', '.join(enabled)}")
     await broadcast_status()
+    # 任务启动成功后, 后台等待其结束并断开云游戏(不阻塞当前调用方)
+    _spawn_bg(_watch_flow_and_exit_cloud_game(trigger, owned, maa_log))
     return True, "任务已启动"
 
 

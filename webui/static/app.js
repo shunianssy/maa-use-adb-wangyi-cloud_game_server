@@ -292,6 +292,9 @@
   let coordEnabled = false;
   let appSettings = null;       // 后端已保存的设置(启动时加载)
   let saveTimer = null;         // 设置自动保存防抖计时器
+  // 是否已成功从后端加载过一次设置: 未加载成功前禁止保存,
+  // 避免表单停留在 HTML 默认值(如页面早于服务就绪打开)时把已保存配置覆盖成默认值
+  let settingsLoaded = false;
 
   function getEnabledTasks() {
     return MAA_TASKS.filter((t) => {
@@ -613,6 +616,13 @@
   /* 设置自动保存(防抖 800ms), patch 为空时保存全部表单 */
   function saveSettings(patch, opts) {
     opts = opts || {};
+    // 未成功加载过设置时禁止保存: 此时表单是 HTML 默认值, 直接提交会把
+    // 已保存配置覆盖掉(页面早于服务就绪打开 / 加载失败的场景)。
+    if (!settingsLoaded) {
+      log("sys", "设置尚未加载完成, 已跳过本次保存(避免覆盖已保存配置)");
+      loadSettings();   // 顺带重试一次加载
+      return;
+    }
     clearTimeout(saveTimer);
     const body = patch || collectSettingsPatch();
     saveTimer = setTimeout(async () => {
@@ -635,9 +645,12 @@
     try {
       const resp = await fetch("/maa/settings");
       const data = await resp.json();
-      if (data && data.settings) applySettings(data.settings);
+      if (data && data.settings) {
+        applySettings(data.settings);
+        settingsLoaded = true;   // 加载成功后才允许自动保存(见 saveSettings)
+      }
     } catch (e) {
-      // 服务未就绪时静默, 表单保持默认值
+      // 服务未就绪时静默, 表单保持默认值; settingsLoaded 保持 false 以阻止误覆盖
     }
   }
 

@@ -123,5 +123,117 @@ class AsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "disconnected")
 
 
+class _FakeCloudGameTask:
+    """最小化的云游戏任务桩: 仅需支持 done() 判断(用于连接归属判定)。"""
+
+    def __init__(self, done: bool = False):
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+
+class DailyFlowAutoCloseTest(unittest.IsolatedAsyncioTestCase):
+    """每日定时流程: 任务结束后自动断开云游戏; 用户手动开启的会话不接管。
+
+    背景: 定时任务若跑完不退出云游戏, 会持续消耗云游戏时长与流量,
+    因此流程结束后需要主动断开; 但用户手动开启的会话不能被误断。
+    """
+
+    def setUp(self):
+        self.app_state = server.app_state
+        self.app_state.reset()
+        self.log = MagicMock()
+
+    def _fake_coord(self, start_result: bool = True):
+        """构造协调器桩: running 表示线程是否存活, start 返回是否启动成功。"""
+        coord = MagicMock()
+        coord.running = False
+        coord.start.return_value = start_result
+        coord.status = self.log
+        return coord
+
+    def test_owned_when_no_active_connection(self):
+        self.app_state.cloud_game_task = None
+        self.assertTrue(server._cloud_game_owned_by_flow())
+
+    def test_not_owned_when_connection_active(self):
+        self.app_state.cloud_game_task = _FakeCloudGameTask(done=False)
+        self.assertFalse(server._cloud_game_owned_by_flow())
+
+    def test_owned_when_previous_task_finished(self):
+        # 上次会话已结束(done=True)视为空闲, 可被本次流程接管
+        self.app_state.cloud_game_task = _FakeCloudGameTask(done=True)
+        self.assertTrue(server._cloud_game_owned_by_flow())
+
+    async def test_auto_exit_skips_user_owned_session(self):
+        # owned=False(用户手动开启)时必须保持连接不动
+        self.app_state.cloud_game_task = _FakeCloudGameTask(done=False)
+        with patch.object(server, "_handle_exit_internal", new=AsyncMock()) as m_exit:
+            await server._auto_exit_cloud_game("每日定时", False, self.log)
+        m_exit.assert_not_awaited()
+
+    async def test_auto_exit_when_owned(self):
+        self.app_state.cloud_game_task = _FakeCloudGameTask(done=False)
+        with patch.object(server, "_handle_exit_internal", new=AsyncMock()) as m_exit:
+            await server._auto_exit_cloud_game("每日定时", True, self.log)
+        m_exit.assert_awaited_once()
+
+    async def test_auto_exit_skips_when_connection_already_gone(self):
+        self.app_state.cloud_game_task = None
+        with patch.object(server, "_handle_exit_internal", new=AsyncMock()) as m_exit:
+            await server._auto_exit_cloud_game("每日定时", True, self.log)
+        m_exit.assert_not_awaited()
+
+    async def test_watch_closes_after_coordinator_finishes(self):
+        self.app_state.cloud_game_task = _FakeCloudGameTask(done=False)
+        with patch.object(server, "_get_coord", return_value=self._fake_coord()), \
+             patch.object(server, "_handle_exit_internal", new=AsyncMock()) as m_exit:
+            await server._watch_flow_and_exit_cloud_game("每日定时", True, self.log)
+        m_exit.assert_awaited_once()
+
+    async def test_watch_skips_when_not_owned(self):
+        coord = self._fake_coord()
+        coord.running = True   # 即使任务还在跑, 不接管就不应做任何事
+        with patch.object(server, "_get_coord", return_value=coord), \
+             patch.object(server, "_handle_exit_internal", new=AsyncMock()) as m_exit:
+            await server._watch_flow_and_exit_cloud_game("每日定时", False, self.log)
+        m_exit.assert_not_awaited()
+
+    async def test_run_daily_flow_releases_connection_when_no_tasks(self):
+        # 云游戏由流程自行启动但没有任何可执行任务 -> 立即释放连接(节省时长/流量)
+        self.app_state.cloud_game_task = None
+        with patch.object(server, "_get_coord", return_value=self._fake_coord()), \
+             patch.object(server, "_handle_start_internal",
+                          new=AsyncMock(return_value=(True, "ok"))), \
+             patch.object(server, "_wait_game_ready", new=AsyncMock(return_value=True)), \
+             patch.object(server.maa_settings, "get",
+                          return_value={"tasks": {}, "annihilation": {}}), \
+             patch.object(server, "_auto_exit_cloud_game", new=AsyncMock()) as m_exit:
+            ok, msg = await server._run_daily_flow("每日定时")
+        self.assertFalse(ok)
+        m_exit.assert_awaited_once()
+
+    async def test_run_daily_flow_schedules_auto_close_after_start(self):
+        # 任务启动成功后应挂后台看护协程, 由它等待结束再断开云游戏
+        self.app_state.cloud_game_task = None
+
+        def _consume_coro(coro):
+            """替代 _spawn_bg: 关闭协程对象, 避免"never awaited"告警。"""
+            coro.close()
+
+        with patch.object(server, "_get_coord", return_value=self._fake_coord()), \
+             patch.object(server, "_handle_start_internal",
+                          new=AsyncMock(return_value=(True, "ok"))), \
+             patch.object(server, "_wait_game_ready", new=AsyncMock(return_value=True)), \
+             patch.object(server.maa_settings, "get", return_value={
+                 "tasks": {"awaken": True}, "annihilation": {},
+                 "fight": {}, "infrast": {}, "award": {}, "inventory": {}, "signin": {}}), \
+             patch.object(server, "_spawn_bg", side_effect=_consume_coro) as m_spawn:
+            ok, msg = await server._run_daily_flow("每日定时")
+        self.assertTrue(ok)
+        m_spawn.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

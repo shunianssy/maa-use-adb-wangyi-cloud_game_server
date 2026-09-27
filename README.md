@@ -145,6 +145,7 @@ Send POST to /start to connect to the cloud game.
     -   领取奖励选项：每日/每周任务、所有邮件、限定池每日单抽、幸运墙合成玉、开采许可合成玉、周年月卡奖励。
     -   运行前可勾选「云游戏签到」；另提供独立的「云游戏签到」按钮。
 -   **每日定时自动执行**：启用并设置时间（HH:MM），到点自动启动云游戏并按上方配置执行；`last_daily_run` 防止当日重复触发；旁边的「测试执行」按钮可立即手动跑一次「启动云游戏 → 一键长草」（不写入 `last_daily_run`）。
+-   **执行完自动断开云游戏**：每日定时 / 「测试执行」跑完一键长草后会自动退出云游戏，节省云游戏时长与流量；若云游戏是你在控制台手动开启的，则不会被自动断开。
 -   **小工具 / 连接信息**：截图保存、坐标显示；状态、分辨率、服务地址、云游戏剩余时长。
 -   所有设置即时自动保存到 `maa_settings.json`，重启服务后自动恢复。
 
@@ -284,7 +285,9 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111",
 | `NETEASE_HOST` / `NETEASE_PORT` | `127.0.0.1` / `22888` | API 服务监听地址与端口 |
 | `NETEASE_WIDTH` / `NETEASE_HEIGHT` | `1280` / `720` | 请求的云游戏分辨率 |
 | `NETEASE_WEBUI_DIR` | `webui/` | 前端静态资源目录 |
-| `NETEASE_MAA_SETTINGS` | `maa_settings.json` | 一键长草设置文件路径 |
+| `NETEASE_MAA_SETTINGS` | `maa_settings.json` | 一键长草设置文件路径（容器部署默认指向 `/app/data/maa_settings.json` 以持久化） |
+| `MAA_LOG_DIR` | `logs/` | 一键长草运行日志落盘目录（容器部署默认指向 `/app/data/logs`） |
+| `NETEASE_DAILY_FLOW_MAX_WAIT` | `14400` | 每日定时流程结束后等待一键长草完成、随后自动断开云游戏的最长等待秒数（4 小时） |
 | `MAA_AUTO_PULL` | `1` | 容器自动拉取 MAA：`1` 缺失时拉取 / `0` 关闭 / `force` 强制更新 |
 | `MAA_RESOURCE_MIRROR` | 空 | MAA 下载镜像前缀（如 `https://ghfast.top/`）；留空时直连优先、失败自动切内置镜像 |
 | `MAA_RESOURCE_URL` | 空 | 显式指定 MAA 压缩包地址（zip / tar.gz），跳过版本 API |
@@ -353,6 +356,7 @@ git pull; docker compose up -d --build
 
 -   **更新 MAA 核心与资源版本**：`MAA_AUTO_PULL=force docker compose up -d`（或先 `rm -rf ./maa_data` 再启动）。
 -   **仅改环境变量 / compose 配置**：`docker compose up -d`，无需重新构建镜像。
+-   **配置不会被重置**：一键长草设置、登录 token 与运行日志默认存放在宿主机 `./data` 目录并挂载进容器（见「数据持久化」），`docker compose up -d --build` 更新重建容器后仍会保留。
 -   **排查提示**：若日志出现 `ModuleNotFoundError`（如 `No module named 'maa_settings'`）或 `[entrypoint] starting server.py ...` 这类旧格式日志，说明容器仍在运行旧镜像，执行上面的 `git pull && docker compose up -d --build` 重新构建即可。
 
 ### MAA 自动拉取说明
@@ -371,12 +375,17 @@ git pull; docker compose up -d --build
 docker build -t netease-cloud-game-maa .
 
 # 2) 启动(MaaCore 模式: 首次启动自动拉取 MAA 到容器内 /app/maa_data)
+#    运行状态(设置/token/日志)统一落到 /app/data, 并用卷持久化, 更新重建不丢失
 docker run -d --name netease-maa \
   -p 22888:22888 \
   -e NETEASE_HOST=0.0.0.0 \
   -e NETEASE_PORT=22888 \
   -e NETEASE_TOKEN=你的token \
+  -e NETEASE_MAA_SETTINGS=/app/data/maa_settings.json \
+  -e NETEASE_TOKEN_FILE=/app/data/token \
+  -e MAA_LOG_DIR=/app/data/logs \
   -v "$PWD/maa_data:/app/maa_data" \
+  -v "$PWD/data:/app/data" \
   netease-cloud-game-maa
 
 # 3) 备选: 桥接模式(ENTRYPOINT 后带参数即启用, 前台运行 maa_bridge, 任务结束后容器退出)
@@ -402,16 +411,18 @@ docker run --rm \
 
 `entrypoint.sh` 依次执行：注入 `NETEASE_TOKEN`（可选，不覆盖已有 token 文件）→ 检测/自动拉取 MAA 到 `MAA_DATA_DIR`（默认 `/app/maa_data`）→ 导出 `MAA_LIB_DIR` / `MAA_DATA_DIR` / `MAA_USER_DIR` / `FAKE_ADB_PATH`（`fake_adb/adb.sh`）与 `LD_LIBRARY_PATH` → 前台运行 `server.py`。带参数启动时切换为桥接模式：后台 `server.py` → 等待 `/info` 就绪（最多 60s）→ 前台 `maa_bridge`。
 
-### 数据持久化（可选）
+### 数据持久化（compose 已默认开启）
 
-容器重建（如 `docker compose up -d --build`）会丢失写入容器内的文件，需要保留时追加卷挂载：
+容器重建（如 `docker compose up -d --build`）会丢弃写入容器内的文件；`docker-compose.yml` 已默认挂载 `./data`，使设置、登录 token 与日志在更新后不丢失：
 
-| 容器内路径 | 内容 | 挂载示例 |
+| 容器内路径 | 内容 | compose 默认挂载 |
 | --- | --- | --- |
-| `/app/maa_data` | MAA 核心与资源（compose 已默认挂载） | `-v ./maa_data:/app/maa_data` |
-| `/app/token` | 登录 token | `-v ./data/token:/app/token` |
-| `/app/maa_settings.json` | 一键长草设置 | `-v ./data/maa_settings.json:/app/maa_settings.json` |
-| `/app/logs` | 任务日志 | `-v ./data/logs:/app/logs` |
+| `/app/maa_data` | MAA 核心与资源 | `-v ./maa_data:/app/maa_data` |
+| `/app/data/maa_settings.json` | 一键长草设置 | `-v ./data:/app/data` |
+| `/app/data/token` | 登录 token | 同上 |
+| `/app/data/logs` | 任务日志 | 同上 |
+
+> 手动 `docker run` 部署（方式二）时，请自行追加 `-v "$PWD/data:/app/data"` 并设置 `NETEASE_MAA_SETTINGS=/app/data/maa_settings.json`、`NETEASE_TOKEN_FILE=/app/data/token`、`MAA_LOG_DIR=/app/data/logs`。
 
 ### 访问与验证
 
