@@ -8,6 +8,7 @@ maa_coordinator 单元测试:验证状态机、任务参数构建、日志落盘
 - MaaCoordinator.start 的过滤/校验与 fight_stage 透传
 - 日志自动落盘(logs/maa_*.log 的内容与路径)
 - 子任务出错达到上限后跳过该任务, 并继续执行后续任务
+- 每周剿灭失败降级: 无常态事务代理卡/未解锁全权委托时记为"跳过"而非错误
 - 库存保持: 缺口计算与规划、DepotInfo 回调解析、仓库识别->理智作战补缺口流程
 
 运行: python -m unittest discover -s tests -v
@@ -321,13 +322,16 @@ class _ScriptedAssistant:
 
     - error_indexes 中指定序号的任务在运行期间持续上报子任务错误
       (每次 running() 上报一次), 直至协调器请求 stop;
+    - chain_error_indexes 中指定序号的任务在 start() 时直接上报 TaskChainError
+      (模拟剿灭无全权委托/无代理卡这类"任务链直接失败"), 然后结束;
     - 其余任务在 start() 时直接上报 TaskChainCompleted 并立即结束;
     - depot_data 非 None 时, Depot 任务启动时先上报 DepotInfo(仓库识别结果),
       供库存保持流程测试(否则模拟识别无数据返回)。
     """
 
-    def __init__(self, error_indexes=(0,), depot_data=None):
+    def __init__(self, error_indexes=(0,), depot_data=None, chain_error_indexes=()):
         self.error_indexes = set(error_indexes)
+        self.chain_error_indexes = set(chain_error_indexes)
         self.depot_data = depot_data
         self.appended: list = []
         self.params: list = []
@@ -363,7 +367,12 @@ class _ScriptedAssistant:
                 "taskchain": "Depot", "what": "DepotInfo",
                 "details": {"done": True, "data": json.dumps(self.depot_data)},
             }))
-        if self._index not in self.error_indexes and self._callback:
+        if self._index in self.chain_error_indexes and self._callback:
+            # 任务链直接出错: 上报 TaskChainError 后立即结束(不进入子任务出错循环)
+            self._callback(10000, json.dumps(
+                {"taskchain": task, "why": "无法使用全权委托"}))
+            self._running = False
+        elif self._index not in self.error_indexes and self._callback:
             # 正常任务: 立即上报完成并结束
             self._callback(10002, json.dumps({"taskchain": task}))
             self._running = False
@@ -437,6 +446,70 @@ class TestSubTaskErrorSkip(unittest.TestCase):
         self.assertIn("combat", snap["finished"])
         self.assertIn("跳过 1 个: combat", snap["message"])
         self.assertIn("子任务出错达到上限", "\n".join(snap["log"]))
+
+
+class TestAnnihilationDowngrade(unittest.TestCase):
+    """每周剿灭失败降级: 无常态事务代理卡/未解锁全权委托时按"跳过"处理, 不报错。
+
+    背景: MAA 的剿灭模式强制走「全权委托」(消耗常态事务代理卡)速刷, 导航时若
+         全权委托不可用会直接判定任务失败退出, 这属于预期内情况。
+    """
+
+    def _new_coord(self) -> "mc.MaaCoordinator":
+        """构造已开始一轮运行的协调器(日志文件由 addCleanup 关闭)。"""
+        coord = mc.MaaCoordinator()
+        coord.status.start_run(["annihilation"])
+        self.addCleanup(coord.status._close_log_file)
+        return coord
+
+    def test_failure_becomes_skip(self):
+        coord = self._new_coord()
+        out = coord._downgrade_annihilation_failure(
+            mc._TaskOutcome(ok=False, message="无法使用全权委托"))
+        self.assertTrue(out.ok)          # 不再作为失败上报
+        self.assertTrue(out.skipped)     # 走"跳过"统计分支
+        self.assertIn("已跳过", out.message)
+        logs = "\n".join(coord.status.snapshot()["log"])
+        self.assertIn("常态事务代理卡", logs)
+        self.assertIn("无法使用全权委托", logs)
+
+    def test_empty_reason_falls_back(self):
+        # MaaCore 未给出原因时, 也必须输出可读说明而不是空括号
+        coord = self._new_coord()
+        out = coord._downgrade_annihilation_failure(mc._TaskOutcome(ok=False))
+        self.assertIn("任务链出错", out.message)
+
+    def test_success_skip_and_stop_unchanged(self):
+        # 成功/已跳过/整轮停止的结果不能被改写
+        coord = self._new_coord()
+        cases = (
+            mc._TaskOutcome(ok=True),
+            mc._TaskOutcome(ok=False, skipped=True, message="子任务出错达到上限"),
+            mc._TaskOutcome(ok=False, stopped_all=True, message="已手动停止"),
+        )
+        for outcome in cases:
+            self.assertEqual(coord._downgrade_annihilation_failure(outcome), outcome)
+        self.assertNotIn("已跳过", "\n".join(coord.status.snapshot()["log"]))
+
+    def test_run_continues_after_annihilation_failure(self):
+        # 剿灭任务链出错后: 记为跳过、不产生错误、后续任务继续执行
+        scripted = _ScriptedAssistant(error_indexes=(), chain_error_indexes=(0,))
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(mc, "MAA_LOG_DIR", tmp), \
+                 mock.patch("maa_core_wrapper.MaaCoreAssistant", lambda *a, **k: scripted), \
+                 mock.patch.object(mc.time, "sleep", lambda _s: None):
+                coord = mc.MaaCoordinator()
+                coord._run(["annihilation", "combat"])
+
+        self.assertEqual(scripted.appended, ["Fight", "Fight"])   # 剿灭 + 理智作战
+        snap = coord.status.snapshot()
+        self.assertEqual(snap["state"], "idle")
+        self.assertEqual(snap["error"], "")                        # 不记为错误
+        self.assertIn("跳过 1 个: annihilation", snap["message"])
+        self.assertIn("combat", snap["finished"])                  # 后续任务照常执行
+        logs = "\n".join(snap["log"])
+        self.assertIn("每周剿灭", logs)
+        self.assertIn("常态事务代理卡", logs)
 
 
 # 库存保持测试用: 所有低级芯片均达标(8 职业各 20)的仓库快照

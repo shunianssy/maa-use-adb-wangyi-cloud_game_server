@@ -13,6 +13,8 @@ MAA 每日任务协调器:在后台线程内用 MaaCore 官方核心(经假 adb 
   卡死整轮(逐个执行是前提: AsstStop 会停止队列中的所有任务)。
 - 任务参数: 严格对齐 https://docs.maa.plus/zh-cn/protocol/integration.html
   (AsstAppendTask 的各任务 params 字段)。
+- 每周剿灭特判: MAA 的剿灭模式强制走「全权委托」(消耗常态事务代理卡)速刷, 无卡或
+  未解锁时 MaaCore 会判定任务失败退出; 该失败在这里降级为"跳过"(不计为整轮错误)。
 """
 
 import datetime
@@ -551,7 +553,7 @@ class _TaskOutcome(NamedTuple):
     Attributes:
         ok: 任务是否正常完成(被跳过/被停止/任务链出错均为 False)
         message: 失败原因(用于日志与状态快照)
-        skipped: 因子任务出错达到上限而跳过
+        skipped: 任务被跳过(子任务出错达到上限, 或每周剿灭缺少可用全权委托)
         stopped_all: 因收到全局停止请求而中断(主流程需结束整轮)
     """
     ok: bool
@@ -846,6 +848,9 @@ class MaaCoordinator:
                 self._current_key, self._current_type = task, task_type
                 if task == "annihilation":
                     self.status.log("每周剿灭: 本周合成玉已达上限时 MAA 会直接跳过(不进关卡属正常)")
+                    self.status.log(
+                        "每周剿灭: 依赖常态事务代理卡(全权委托)速刷; "
+                        "无卡或未解锁时会被跳过, 不计为失败")
 
                 try:
                     tid = assist.append_task(task_type, params)
@@ -872,6 +877,9 @@ class MaaCoordinator:
                 if outcome.stopped_all:
                     stopped_all = True
                     break
+                if task == "annihilation":
+                    # 每周剿灭失败降级为"跳过"(原因见方法注释), 避免无卡时报错刷屏
+                    outcome = self._downgrade_annihilation_failure(outcome)
                 self.status.mark_done(task, outcome.ok, outcome.message)
                 if outcome.skipped:
                     skipped.append(task)
@@ -931,6 +939,29 @@ class MaaCoordinator:
         if state == "stopped":
             return _TaskOutcome(ok=False, message="任务被停止")
         return _TaskOutcome(ok=True, message="")
+
+    def _downgrade_annihilation_failure(self, outcome: _TaskOutcome) -> _TaskOutcome:
+        """把每周剿灭的失败降级为"跳过", 不计为整轮运行错误。
+
+        背景: MAA 的剿灭模式**强制**通过「全权委托」(消耗常态事务代理卡)速刷,
+              导航到剿灭页后会检查全权委托是否可用; 不可用(无代理卡/未解锁)时
+              MaaCore 直接判定任务失败退出 —— 这属于预期内情况, 不应作为错误上报。
+              因此这里统一降级为"跳过", 由日志说明原因。
+              注: 手头的代理卡中途用完时 MAA 可能退回普通代理作战(耗时变长),
+              该行为由 MaaCore 决定, 本地无法拦截。
+
+        Args:
+            outcome: _wait_task 返回的原始任务结果
+
+        Returns:
+            失败时替换为 skipped=True 的正常结果; 成功/已跳过/整轮停止时原样返回。
+        """
+        if outcome.ok or outcome.skipped or outcome.stopped_all:
+            return outcome
+        why = outcome.message or "任务链出错"
+        self.status.log(
+            f"每周剿灭: 未执行(常见原因: 无常态事务代理卡/未解锁全权委托), 已跳过({why})")
+        return _TaskOutcome(ok=True, message=f"已跳过: {why}", skipped=True)
 
     def _wait_not_running(self, assist, timeout: float = 30.0) -> None:
         """等待 MaaCore 真正结束当前任务(AsstStop 需等当前节点执行完)。"""
