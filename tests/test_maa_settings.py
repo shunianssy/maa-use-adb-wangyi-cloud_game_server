@@ -69,14 +69,16 @@ class TestMaaSettings(unittest.TestCase):
         self.assertNotIn("Bogus", default_settings()["infrast"]["facility"])
 
     def test_inventory_defaults(self):
-        # 库存保持默认: 任务开关关闭, 4 个保持项均未勾选(预设目标数量)
+        # 库存保持默认: 任务开关关闭, 5 个保持项均未勾选(预设目标数量)
         s = default_settings()
         self.assertIn("inventory", s)
         self.assertFalse(s["tasks"]["inventory"])
         inv = s["inventory"]
-        self.assertEqual(set(inv), {"chip_low", "chip_high", "certificate", "skill_summary"})
+        self.assertEqual(set(inv), {"chip_low", "chip_high", "certificate",
+                                    "skill_summary", "battle_record_high"})
         for key, count in (("chip_low", 20), ("chip_high", 20),
-                           ("certificate", 20), ("skill_summary", 200)):
+                           ("certificate", 20), ("skill_summary", 200),
+                           ("battle_record_high", 200)):
             self.assertFalse(inv[key]["enabled"], key)
             self.assertEqual(inv[key]["count"], count, key)
 

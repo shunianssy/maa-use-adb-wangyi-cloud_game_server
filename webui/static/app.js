@@ -275,12 +275,13 @@
     "awaken", "recruit", "infrast", "combat", "inventory", "credit", "reward",
   ];
   /* 库存保持项: key 与后端 maa_coordinator.INVENTORY_PRESETS 一一对应;
-     数组顺序即规划优先级(低级芯片 → 高级芯片组 → 采购凭证 → 技巧概要) */
+     数组顺序即规划优先级(低级芯片 → 高级芯片组 → 采购凭证 → 技巧概要 → 高级作战记录) */
   const INVENTORY_ITEMS = [
     { key: "chip_low", id: "invChipLow", countId: "invChipLowCount", defaultCount: 20 },
     { key: "chip_high", id: "invChipHigh", countId: "invChipHighCount", defaultCount: 20 },
     { key: "certificate", id: "invCertificate", countId: "invCertificateCount", defaultCount: 20 },
     { key: "skill_summary", id: "invSkillSummary", countId: "invSkillSummaryCount", defaultCount: 200 },
+    { key: "battle_record_high", id: "invBattleRecord", countId: "invBattleRecordCount", defaultCount: 200 },
   ];
   // 换班模式说明(MAA Infrast.mode: 0=常规 / 10000=自定义基建 / 20000=队列轮换)
   const INFRAST_MODE_NOTES = {
@@ -1086,6 +1087,7 @@
       "invChipLow", "invChipLowCount", "invChipHigh", "invChipHighCount",
       "invCertificate", "invCertificateCount",
       "invSkillSummary", "invSkillSummaryCount",
+      "invBattleRecord", "invBattleRecordCount",
       "dailyEnabled", "dailyTime",
     ];
     formEls.forEach((id) => {

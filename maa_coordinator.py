@@ -98,10 +98,20 @@ INVENTORY_PRESETS = {
         "stages": [{"stage": "CA-5", "open_days": [2, 3, 5, 7],
                     "items": [("3303", "技巧概要·卷3")]}],
     },
+    "battle_record_high": {
+        "label": "高级作战记录",
+        "default_count": 200,
+        # 战术演习(LS): 每天开放, 无开放日限制(不配置 open_days 即视为常驻);
+        # LS-6 为当前最高级经验本(MAA 官方资源中 LS-5 已自动跳转 LS-6),
+        # 常规固定掉落高级作战记录(2004), 与 drops 达标停止条件配合良好
+        "stages": [{"stage": "LS-6", "items": [("2004", "高级作战记录")]}],
+    },
 }
 
 # 库存保持项的规划顺序(与 WebUI 勾选区从上到下的顺序一致)
-INVENTORY_ORDER = ["chip_low", "chip_high", "certificate", "skill_summary"]
+INVENTORY_ORDER = [
+    "chip_low", "chip_high", "certificate", "skill_summary", "battle_record_high",
+]
 
 # 星期中文名(ISO: 1=周一 ... 7=周日), 用于"下次开放"日志提示
 _WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")

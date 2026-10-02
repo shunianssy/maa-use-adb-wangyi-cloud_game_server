@@ -253,7 +253,7 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"tasks":["awaken","rec
 
 任务 key：`awaken`（开始唤醒）、`reward`（领取奖励）、`recruit`（自动公招）、`infrast`（基建换班）、`annihilation`（每周剿灭）、`inventory`（库存保持）、`combat`（理智作战）、`credit`（信用收支）。
 
-说明：`options.fight.times` 支持传数字或 `"auto"`（等于刷完当前理智自动停）；代理倍率固定为 AUTO，无需配置。`options.inventory` 传各保持项的 `{"enabled": bool, "count": 目标数量}`（键：`chip_low` / `chip_high` / `certificate` / `skill_summary`），库存保持任务会先扫描仓库再按缺口追加理智作战。
+说明：`options.fight.times` 支持传数字或 `"auto"`（等于刷完当前理智自动停）；代理倍率固定为 AUTO，无需配置。`options.inventory` 传各保持项的 `{"enabled": bool, "count": 目标数量}`（键：`chip_low` / `chip_high` / `certificate` / `skill_summary` / `battle_record_high`），库存保持任务会先扫描仓库再按缺口追加理智作战。
 
 ### 云游戏账号登录接口
 

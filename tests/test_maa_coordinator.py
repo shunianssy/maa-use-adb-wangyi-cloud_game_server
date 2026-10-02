@@ -603,6 +603,28 @@ class TestInventoryPlan(unittest.TestCase):
         plan = mc.plan_inventory({}, self._make_opt(skill_summary=200), weekday=self.TUESDAY)
         self.assertEqual((plan["stage"], plan["item_id"]), ("CA-5", "3303"))
 
+    def test_battle_record_high_preset(self):
+        # 高级作战记录(2004) -> LS-6: 预设映射与默认目标数量 200 防误改
+        preset = mc.INVENTORY_PRESETS["battle_record_high"]
+        self.assertEqual(preset["default_count"], 200)
+        self.assertEqual(preset["stages"][0]["stage"], "LS-6")
+        self.assertEqual(preset["stages"][0]["items"], [("2004", "高级作战记录")])
+        # 战术演习(LS)每天开放: 任意星期都应能规划出计划(不受开放日限制)
+        for weekday in (self.MONDAY, self.TUESDAY, self.SATURDAY):
+            plan = mc.plan_inventory(
+                {}, self._make_opt(battle_record_high=200), weekday=weekday)
+            self.assertEqual((plan["stage"], plan["item_id"]), ("LS-6", "2004"), weekday)
+            self.assertEqual(plan["target"], 200)
+            self.assertEqual(plan["gap"], 200)
+        # count 非法 -> 回退预设默认值 200
+        plan = mc.plan_inventory(
+            {}, {"battle_record_high": {"enabled": True, "count": "abc"}},
+            weekday=self.MONDAY)
+        self.assertEqual(plan["target"], 200)
+        # 已达标 -> 不产生计划
+        self.assertIsNone(mc.plan_inventory(
+            {"2004": 200}, self._make_opt(battle_record_high=200), weekday=self.MONDAY))
+
     # ---- 开放日(资源关按星期轮换, 非开放日必须跳过, 否则 MAA 导航卡住) ----
 
     def test_open_days_from_preset(self):

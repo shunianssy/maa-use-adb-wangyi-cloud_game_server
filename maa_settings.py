@@ -24,6 +24,7 @@
       "chip_high": {"enabled": false, "count": 20}, # 高级芯片组(全职业)
       "certificate": {"enabled": false, "count": 20},      # 采购凭证(红票)
       "skill_summary": {"enabled": false, "count": 200},   # 技巧概要·卷3
+      "battle_record_high": {"enabled": false, "count": 200},  # 高级作战记录
   },
   "daily": {"enabled": false, "time": "08:00"},     # 每日定时执行
   "last_daily_run": ""                              # 上次定时执行日期(YYYY-MM-DD)
@@ -109,6 +110,8 @@ DEFAULT_SETTINGS: Dict = {
         "chip_high": {"enabled": False, "count": 20},      # 高级芯片组(全职业)
         "certificate": {"enabled": False, "count": 20},    # 采购凭证(红票, AP-5)
         "skill_summary": {"enabled": False, "count": 200}, # 技巧概要·卷3(CA-5)
+        # 高级作战记录(LS-6, 每天开放): 默认目标 200
+        "battle_record_high": {"enabled": False, "count": 200},
     },
     "award": {
         # 领取奖励细分项(对应 Award 任务参数, 默认与抓图配置一致全勾选)
