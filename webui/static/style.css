@@ -448,6 +448,12 @@ html, body {
 #inventoryOptions .inline-check span { min-width: 132px; }
 .opt-note { margin: 0; font-size: 11px; color: var(--text-dim); }
 .fight-options .hint { flex: none; font-size: 11px; }
+/* 一键长草: 配置账号选择器(按账号加载/保存独立配置) */
+.account-config-row select { flex: 1 1 140px; min-width: 0; }
+.account-config-row .hint { color: var(--text-dim); }
+/* 每日定时: 每周执行日勾选行(周一~周日) */
+.weekday-row { gap: 10px; }
+.weekday-row .weekday-label { flex: none; color: var(--text-dim); }
 .fight-options input[type="time"] {
   padding: 4px 8px;
   border: 1px solid var(--border);

@@ -5,6 +5,15 @@
 
 FROM python:3.12-slim
 
+# 国内构建加速(可选): 通过 --build-arg 覆盖, 默认使用官方源
+#   APT_MIRROR      : Debian APT 镜像主机(如 mirrors.aliyun.com)
+#   PIP_INDEX_URL   : PyPI 镜像地址(如 https://mirrors.aliyun.com/pypi/simple/)
+#   PIP_TRUSTED_HOST: PyPI 镜像主机(https 镜像可省略)
+# 使用 docker-compose.cn.yml 时会自动传入阿里云镜像参数
+ARG APT_MIRROR="deb.debian.org"
+ARG PIP_INDEX_URL=""
+ARG PIP_TRUSTED_HOST=""
+
 # 避免 Python 输出缓冲, 便于容器日志实时收集
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
@@ -19,18 +28,31 @@ COPY requirements.txt ./
 #   ffmpeg / ca-certificates: aiortc/av 运行时与 HTTPS 校验
 #   说明: 官方 libMaaCore.so 及其随包库仅依赖基础 glibc(libc/libdl/libm/libpthread/
 #         libgcc_s/librt), 与 python:3.12-slim(Debian) 自带一致, 无需额外安装
-RUN apt-get update \
+#   APT_MIRROR: 传入镜像主机时替换 Debian 默认源(兼容 deb822/debian.sources 与旧 sources.list)
+RUN if [ "${APT_MIRROR}" != "deb.debian.org" ]; then \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null \
+        || sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null \
+        || true; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir -r requirements.txt
+# PyPI 镜像: 传入 PIP_INDEX_URL 时走镜像(国内加速), 否则直连官方源
+RUN if [ -n "${PIP_INDEX_URL}" ]; then \
+        pip install --no-cache-dir -i "${PIP_INDEX_URL}" \
+            --trusted-host "${PIP_TRUSTED_HOST:-mirrors.aliyun.com}" -r requirements.txt; \
+    else \
+        pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 # 2) 复制应用代码
-#    token / maa_data 不复制(通过卷或环境变量注入, 见 docker-compose.yml)
+#    token / maa_data / 账号配置不复制(通过卷或环境变量注入, 见 docker-compose.yml)
 COPY sdk/ ./sdk/
 COPY webui/ ./webui/
 COPY server.py ./
 COPY maa_core_wrapper.py maa_coordinator.py maa_settings.py netease_login.py ./
+COPY accounts.py account_settings.py ./
 COPY fake_adb/ ./fake_adb/
 COPY maa_bridge/ ./maa_bridge/
 COPY maa_pipeline/ ./maa_pipeline/

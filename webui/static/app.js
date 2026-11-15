@@ -293,9 +293,14 @@
   let coordEnabled = false;
   let appSettings = null;       // 后端已保存的设置(启动时加载)
   let saveTimer = null;         // 设置自动保存防抖计时器
+  let pendingSave = null;       // 待提交的设置 {body, phone, opts}(切换账号前会立即提交)
   // 是否已成功从后端加载过一次设置: 未加载成功前禁止保存,
   // 避免表单停留在 HTML 默认值(如页面早于服务就绪打开)时把已保存配置覆盖成默认值
   let settingsLoaded = false;
+  // 当前正在编辑配置的账号("" 表示默认配置, 未单独配置的账号共用)
+  let configAccountPhone = "";
+  // 最近一次账号列表(用于「配置账号」下拉与提示文案)
+  let lastAccounts = [];
 
   function getEnabledTasks() {
     return MAA_TASKS.filter((t) => {
@@ -317,20 +322,25 @@
     if (els.annihilationEnabled && els.annihilationEnabled.checked) {
       tasks.push("annihilation");
     }
-    if (!tasks.length) {
+    // 多账号模式: 各账号使用自己的已保存配置, 不受当前表单任务开关限制
+    const multiMode = !!(els.multiAccountEnabled && els.multiAccountEnabled.checked);
+    if (!tasks.length && !multiMode) {
       log("fail", "请至少启用一个任务");
       return;
     }
     // 基建换班需要至少一项设施, 否则 MAA 会直接报参数非法
-    if (tasks.includes("infrast") && !collectFacilities().length) {
+    if (!multiMode && tasks.includes("infrast") && !collectFacilities().length) {
       log("fail", "基建设施至少需要勾选一项");
       return;
     }
     const options = collectRunOptions();
     saveSettings(null, { silent: true });   // 先落盘当前表单, 保证下次加载一致
+    await flushSettingsSave();              // 多账号模式按账号已保存配置执行, 必须确保已落盘
     setMaaStatus("running");
     els.maaProgress.textContent = "";
-    log("sys", `一键长草开始: ${tasks.join(", ")}`);
+    log("sys", multiMode
+      ? "一键长草开始(多账号模式, 各账号使用自己的配置)"
+      : `一键长草开始: ${tasks.join(", ")}`);
     try {
       const resp = await fetch("/maa/start", {
         method: "POST",
@@ -537,8 +547,26 @@
       daily: {
         enabled: !!(els.dailyEnabled && els.dailyEnabled.checked),
         time: (els.dailyTime && els.dailyTime.value) || "08:00",
+        weekdays: collectWeekdays(),
       },
     };
+  }
+
+  /* 收集每周执行日(ISO 星期 1~7, 按周一~周日顺序) */
+  function collectWeekdays() {
+    const days = [];
+    document.querySelectorAll("#dailyWeekdays input[data-weekday]").forEach((box) => {
+      if (box.checked) days.push(Number(box.dataset.weekday));
+    });
+    return days;
+  }
+
+  /* 回填每周执行日(缺省为全选, 兼容旧设置) */
+  function applyWeekdays(weekdays) {
+    const picked = Array.isArray(weekdays) ? new Set(weekdays.map(Number)) : null;
+    document.querySelectorAll("#dailyWeekdays input[data-weekday]").forEach((box) => {
+      box.checked = picked ? picked.has(Number(box.dataset.weekday)) : true;
+    });
   }
 
   /* 应用已保存设置到表单(页面加载/设置变化时) */
@@ -580,6 +608,7 @@
     const d = s.daily || {};
     if (els.dailyEnabled) els.dailyEnabled.checked = !!d.enabled;
     if (els.dailyTime) els.dailyTime.value = d.time || "08:00";
+    applyWeekdays(d.weekdays);
     if (els.dailyNote) {
       els.dailyNote.textContent = s.last_daily_run
         ? `上次定时执行: ${s.last_daily_run}` : "尚未定时执行过";
@@ -614,7 +643,9 @@
     syncInventoryStates();
   }
 
-  /* 设置自动保存(防抖 800ms), patch 为空时保存全部表单 */
+  /* 设置自动保存(防抖 800ms), patch 为空时保存全部表单。
+     保存目标在调用时固定: configAccountPhone 为空时存全局默认配置,
+     否则存入该账号的独立配置(切换账号时不会串存)。 */
   function saveSettings(patch, opts) {
     opts = opts || {};
     // 未成功加载过设置时禁止保存: 此时表单是 HTML 默认值, 直接提交会把
@@ -625,26 +656,41 @@
       return;
     }
     clearTimeout(saveTimer);
-    const body = patch || collectSettingsPatch();
-    saveTimer = setTimeout(async () => {
-      try {
-        const resp = await fetch("/maa/settings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const data = await resp.json();
-        if (data && data.settings) appSettings = data.settings;
-        if (!opts.silent) log("ok", "设置已保存");
-      } catch (e) {
-        if (!opts.silent) log("fail", `设置保存失败: ${e.message}`);
-      }
-    }, 800);
+    pendingSave = { body: patch || collectSettingsPatch(), phone: configAccountPhone, opts };
+    saveTimer = setTimeout(flushSettingsSave, 800);
   }
 
+  /* 立即提交待保存的设置(切换配置账号前调用, 避免防抖期间丢失上一个账号的改动) */
+  async function flushSettingsSave() {
+    const pending = pendingSave;
+    pendingSave = null;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    if (!pending) return;
+    const url = pending.phone
+      ? `/maa/settings?phone=${encodeURIComponent(pending.phone)}`
+      : "/maa/settings";
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pending.body),
+      });
+      const data = await resp.json();
+      if (data && data.settings) appSettings = data.settings;
+      if (!pending.opts.silent) log("ok", "设置已保存");
+    } catch (e) {
+      if (!pending.opts.silent) log("fail", `设置保存失败: ${e.message}`);
+    }
+  }
+
+  /* 加载设置: 指定账号时加载其独立配置(后端自动合并全局默认值) */
   async function loadSettings() {
     try {
-      const resp = await fetch("/maa/settings");
+      const url = configAccountPhone
+        ? `/maa/settings?phone=${encodeURIComponent(configAccountPhone)}`
+        : "/maa/settings";
+      const resp = await fetch(url);
       const data = await resp.json();
       if (data && data.settings) {
         applySettings(data.settings);
@@ -674,6 +720,8 @@
   /* 「测试执行」: 立即跑一次 启动云游戏 → 一键长草(不影响每日定时记录) */
   async function doMaaDailyTest() {
     log("sys", "发起测试执行(启动云游戏 → 一键长草)…");
+    saveSettings(null, { silent: true });   // 多账号模式按账号配置执行, 先确保改动已落盘
+    await flushSettingsSave();
     try {
       const resp = await fetch("/maa/daily/test", { method: "POST" });
       const data = await resp.json().catch(() => null);
@@ -855,6 +903,74 @@
 
   /* ---------- 多账号(列表 / 切换当前账号 / 轮流执行) ---------- */
 
+  /* 同步「配置账号」下拉: 默认配置 + 所有账号, 并尽量保留当前选择 */
+  function renderAccountConfigSelect(accounts) {
+    const select = els.accountConfigSelect;
+    if (!select) return;
+    // 正在编辑的账号已被移除: 回到默认配置
+    if (configAccountPhone && !accounts.some((a) => a.phone === configAccountPhone)) {
+      configAccountPhone = "";
+    }
+    select.innerHTML = "";
+    const def = document.createElement("option");
+    def.value = "";
+    def.textContent = "默认配置(未单独配置的账号共用)";
+    select.appendChild(def);
+    accounts.forEach((acc) => {
+      const opt = document.createElement("option");
+      opt.value = acc.phone;
+      opt.textContent = acc.masked || acc.phone;
+      select.appendChild(opt);
+    });
+    select.value = configAccountPhone;
+    updateAccountConfigHint();
+  }
+
+  /* 更新「配置账号」提示文案(当前正在编辑哪个账号的配置) */
+  function updateAccountConfigHint() {
+    if (!els.accountConfigHint) return;
+    if (!configAccountPhone) {
+      els.accountConfigHint.textContent = "正在编辑默认配置(未单独配置的账号共用)";
+      return;
+    }
+    const acc = lastAccounts.find((a) => a.phone === configAccountPhone);
+    els.accountConfigHint.textContent =
+      `正在编辑账号 ${(acc && acc.masked) || configAccountPhone} 的独立配置`;
+  }
+
+  /* 切换配置账号: 先立即落盘上一个账号的改动, 再加载目标账号的配置。
+     选择账号时同步切换为云游戏当前账号, 保证单账号执行/签到使用同一账号。 */
+  async function onConfigAccountChange() {
+    const phone = (els.accountConfigSelect && els.accountConfigSelect.value) || "";
+    await flushSettingsSave();
+    configAccountPhone = phone;
+    updateAccountConfigHint();
+    if (phone) {
+      try {
+        const resp = await fetch("/api/accounts/switch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone }),
+        });
+        const data = await resp.json().catch(() => null);
+        if (data && data.status === "ok") {
+          log("ok", data.message || "已切换账号");
+          if (Array.isArray(data.accounts)) {
+            renderAccounts({ accounts: data.accounts, auto_switch: data.auto_switch });
+          }
+        } else {
+          log("fail", (data && data.message) || "切换账号失败");
+        }
+      } catch (e) {
+        log("fail", `切换账号请求失败: ${e.message}`);
+      }
+    }
+    await loadSettings();
+    // 刷新「云游戏账号」卡片的当前账号提示(切换可能只对下次启动生效)
+    loadLoginStatus();
+    log("sys", phone ? "已加载该账号的独立配置" : "已加载默认配置");
+  }
+
   /* 渲染账号列表: 手机号(脱敏) + 当前标记 + 启用开关 + 切换/移除按钮 */
   function renderAccounts(data) {
     if (!els.accountList) return;
@@ -866,6 +982,8 @@
     const key = JSON.stringify(accounts) + "|" + !!(data && data.auto_switch);
     if (key === (els.accountList.dataset.lastKey || "")) return;
     els.accountList.dataset.lastKey = key;
+    lastAccounts = accounts;
+    renderAccountConfigSelect(accounts);
     els.accountList.innerHTML = "";
     if (!accounts.length) {
       const li = document.createElement("li");
@@ -944,12 +1062,19 @@
       if (data && data.status === "ok") {
         log("ok", data.message || "操作成功");
         if (Array.isArray(data.accounts)) {
+          const editing = configAccountPhone;
           renderAccounts({ accounts: data.accounts, auto_switch: data.auto_switch });
+          // 正在编辑的账号被移除: 回到默认配置并重新加载表单
+          if (editing && !data.accounts.some((a) => a.phone === editing)) {
+            loadSettings();
+          }
         }
         loadLoginStatus();
       } else {
         log("fail", (data && data.message) || `操作失败(HTTP ${resp.status})`);
-        loadAccounts();   // 失败时以服务端列表为准, 回滚前端勾选状态
+        // 失败时以服务端列表为准: 清空缓存键强制重绘, 回滚前端勾选状态
+        if (els.accountList) els.accountList.dataset.lastKey = "";
+        loadAccounts();
       }
     } catch (e) {
       log("fail", `请求失败: ${e.message}`);
@@ -1142,6 +1267,7 @@
     els.dailyEnabled = $("dailyEnabled");
     els.dailyTime = $("dailyTime");
     els.dailyNote = $("dailyNote");
+    els.dailyWeekdays = $("dailyWeekdays");
     // 领取奖励细分项
     els.awardOptions = $("awardOptions");
     ["awardAward", "awardMail", "awardRecruit", "awardOrundum",
@@ -1185,6 +1311,12 @@
     // 多账号: 账号列表与「多账号轮流执行」开关
     els.accountList = $("accountList");
     els.multiAccountEnabled = $("multiAccountEnabled");
+    // 一键长草: 配置账号下拉(按账号加载/保存独立配置)
+    els.accountConfigSelect = $("accountConfigSelect");
+    els.accountConfigHint = $("accountConfigHint");
+    if (els.accountConfigSelect) {
+      els.accountConfigSelect.addEventListener("change", onConfigAccountChange);
+    }
     if (els.multiAccountEnabled) {
       els.multiAccountEnabled.addEventListener("change", () => {
         postAccount("/api/accounts/auto",
@@ -1211,6 +1343,26 @@
     // 每日定时「测试执行」
     els.btnDailyTest = $("btnDailyTest");
     if (els.btnDailyTest) els.btnDailyTest.addEventListener("click", doMaaDailyTest);
+    // 每周执行日(周一~周日): 勾选即保存
+    if (els.dailyWeekdays) {
+      els.dailyWeekdays.querySelectorAll("input[data-weekday]").forEach((box) => {
+        box.addEventListener("change", () => {
+          if (els.dailyEnabled && els.dailyEnabled.checked && !collectWeekdays().length) {
+            log("fail", "已取消全部执行日, 每日定时将不会触发");
+          }
+          saveSettings();
+        });
+      });
+    }
+    if (els.dailyEnabled) {
+      els.dailyEnabled.addEventListener("change", () => {
+        // 启用定时但未勾选任何执行日时自动全选, 避免定时永不触发
+        if (els.dailyEnabled.checked && !collectWeekdays().length) {
+          applyWeekdays(null);
+          log("sys", "未选择执行日, 已默认勾选周一至周日");
+        }
+      });
+    }
     // 表单改动 → 联动 + 自动保存
     const formEls = [
       "fightStage", "fightTimes", "medicineSel",

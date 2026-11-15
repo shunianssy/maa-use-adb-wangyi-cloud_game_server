@@ -6,6 +6,7 @@
 .git
 token
 accounts.json
+account_settings.json
 demo.jpg
 demo2.png
 *.log

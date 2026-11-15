@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>网易云游戏 · MAA 远程控制台</title>
-  <link rel="stylesheet" href="/static/style.css?v=6" />
+  <link rel="stylesheet" href="/static/style.css?v=9" />
 </head>
 <body>
   <header class="topbar">
@@ -96,6 +96,14 @@
         <div class="card-head">
           <h2>一键长草</h2>
           <span id="maaStatus" class="maa-status">空闲</span>
+        </div>
+        <!-- 配置账号: 每个账号可保存独立的一键长草配置(未配置则共用默认配置) -->
+        <div class="opt-row account-config-row">
+          <label for="accountConfigSelect">配置账号</label>
+          <select id="accountConfigSelect">
+            <option value="">默认配置(未单独配置的账号共用)</option>
+          </select>
+          <span class="hint" id="accountConfigHint">可为每个账号保存独立配置</span>
         </div>
         <div class="task-grid">
           <label class="task-toggle" data-task="awaken">
@@ -342,6 +350,18 @@
           <button id="btnDailyTest" class="btn btn-ghost" type="button"
                   title="立即执行一次「启动云游戏 → 一键长草」, 不影响每日定时记录">测试执行</button>
           <span class="hint">到点自动:启动云游戏 → 一键长草(按上方勾选与设置)</span>
+          <!-- 每周执行日: 按账号保存(未单独配置的账号沿用默认配置) -->
+          <div class="opt-row weekday-row" id="dailyWeekdays" title="仅勾选的星期触发定时执行(按账号保存)">
+            <span class="weekday-label">执行日</span>
+            <label class="inline-check"><input type="checkbox" data-weekday="1" checked /><span>周一</span></label>
+            <label class="inline-check"><input type="checkbox" data-weekday="2" checked /><span>周二</span></label>
+            <label class="inline-check"><input type="checkbox" data-weekday="3" checked /><span>周三</span></label>
+            <label class="inline-check"><input type="checkbox" data-weekday="4" checked /><span>周四</span></label>
+            <label class="inline-check"><input type="checkbox" data-weekday="5" checked /><span>周五</span></label>
+            <label class="inline-check"><input type="checkbox" data-weekday="6" checked /><span>周六</span></label>
+            <label class="inline-check"><input type="checkbox" data-weekday="7" checked /><span>周日</span></label>
+          </div>
+          <p class="opt-note">执行日按账号保存: 在「配置账号」选中账号后修改即保存到该账号(启用/时间仍为全局); 全部取消勾选则该账号定时不执行</p>
         </div>
         <p class="tool-note" id="dailyNote">—</p>
         <p class="tool-note">全部设置即时自动保存(maa_settings.json); 日志自存 logs/maa_*.log</p>
@@ -380,6 +400,6 @@
   </main>
 
   <!-- v= 版本号用于强制刷新静态资源(避免改版后浏览器复用旧缓存) -->
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 </html>

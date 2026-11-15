@@ -33,6 +33,8 @@ from netease_login import (
 )
 # 多账号: 保存多个账号 token, 支持按列表顺序轮流执行一键长草
 from accounts import AccountStore
+# 账号独立配置: 每个账号可保存一份一键长草运行配置(未配置则回落到全局设置)
+from account_settings import AccountSettingsStore
 
 # --- 配置 ---
 # 服务器端部署时可通过环境变量覆盖以下配置(见 Docker/生产环境使用方式)
@@ -46,6 +48,10 @@ TOKEN_FILE = os.environ.get(
 ACCOUNTS_FILE = os.environ.get(
     "NETEASE_ACCOUNTS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.json"))
+# 账号独立配置文件: 每个账号的一键长草运行配置(已加入 .gitignore)
+ACCOUNT_SETTINGS_FILE = os.environ.get(
+    "NETEASE_ACCOUNT_SETTINGS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "account_settings.json"))
 HOST = os.environ.get("NETEASE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NETEASE_PORT", "22888"))
 WIDTH = int(os.environ.get("NETEASE_WIDTH", "1280"))
@@ -69,6 +75,9 @@ maa_settings = MaaSettings(NETEASE_MAA_SETTINGS)
 
 # 多账号列表实例(启动即加载; 登录成功后自动登记, 轮流执行时按顺序切换)
 accounts_store = AccountStore(ACCOUNTS_FILE)
+
+# 账号独立配置实例(未配置的账号自动使用全局设置)
+account_settings = AccountSettingsStore(ACCOUNT_SETTINGS_FILE)
 
 # --- 颜色定义 ---
 class Colors:
@@ -628,6 +637,41 @@ def _get_coord() -> Optional['MaaCoordinator']:
     return maa_coord
 
 
+# 账号可独立覆盖的运行配置字段(其余字段如 daily 仍为全局设置)
+_RUN_SETTING_KEYS = ("tasks", "fight", "annihilation", "infrast",
+                     "signin", "inventory", "award")
+
+
+def _settings_for_account(phone: str) -> dict:
+    """返回账号的完整设置(全局设置 + 账号独立覆盖)。
+
+    phone 为空或账号未单独配置时, 结果等同于全局设置(向后兼容)。
+    """
+    base = maa_settings.get()
+    if not normalize_phone(phone):
+        return base
+    return account_settings.merged(phone, base)
+
+
+def _run_options_from_settings(cfg: dict) -> tuple:
+    """从完整设置中提取本次执行的任务列表与作战选项。
+
+    Returns:
+        (tasks, options): tasks 已含 annihilation(若启用), options 供协调器使用
+    """
+    tasks = [k for k, v in (cfg.get("tasks") or {}).items() if v]
+    if (cfg.get("annihilation") or {}).get("enabled"):
+        tasks.append("annihilation")
+    opts = {
+        "fight": cfg.get("fight") or {},
+        "annihilation": cfg.get("annihilation") or {},
+        "infrast": cfg.get("infrast") or {},
+        "award": cfg.get("award") or {},
+        "inventory": cfg.get("inventory") or {},
+    }
+    return tasks, opts
+
+
 # 假 adb 命令日志节流表: key -> (最后一次记录时间, 期间同类命令计数)
 # MAA 识别阶段截图频率很高(每帧一条 exec-out screencap), 若不节流会刷爆日志。
 _adb_log_throttle: dict = {}
@@ -696,7 +740,22 @@ async def handle_maa_start(request: web.Request):
     except (json.JSONDecodeError, AttributeError):
         return web.json_response({"status": "error", "message": "Invalid request body"}, status=400)
 
-    if not isinstance(tasks, list) or not tasks:
+    if not isinstance(tasks, list):
+        tasks = []
+
+    coord = _get_coord()
+    # 多账号模式: 后台按账号列表顺序执行, 每个账号使用自己的独立配置
+    if _multi_accounts_enabled():
+        if coord.running or _multi_busy():
+            return web.json_response(
+                {"status": "error", "message": "已有一键长草任务在运行"}, status=400)
+        global _multi_flow_task
+        _multi_flow_task = _spawn_bg(_run_multi_account_flow("一键长草(多账号)"))
+        coord.status.log("多账号轮流执行已开始: 各账号使用自己的独立配置")
+        return web.json_response(
+            {"status": "ok", "message": "多账号任务已开始(依次切换账号执行)"})
+
+    if not tasks:
         return web.json_response({"status": "error", "message": "请至少启用一个任务"}, status=400)
 
     # 运行选项与已保存设置合并: 表单值优先, 缺失字段用设置默认
@@ -711,19 +770,6 @@ async def handle_maa_start(request: web.Request):
         "inventory": {**saved.get("inventory", {}), **(options.get("inventory") or {})},
     }
     do_signin = bool(merged.get("signin", {}).get("enabled", False))
-
-    coord = _get_coord()
-    # 多账号模式: 后台按账号列表顺序逐个「切换账号 → 启动云游戏 → 一键长草 → 断开」
-    if _multi_accounts_enabled():
-        if coord.running or _multi_busy():
-            return web.json_response(
-                {"status": "error", "message": "已有一键长草任务在运行"}, status=400)
-        global _multi_flow_task
-        _multi_flow_task = _spawn_bg(_run_multi_account_flow(
-            "一键长草(多账号)", tasks, merged, do_signin))
-        coord.status.log("多账号轮流执行已开始: 按账号列表顺序逐个执行一键长草")
-        return web.json_response(
-            {"status": "ok", "message": "多账号任务已开始(依次切换账号执行)"})
 
     # 「开始唤醒」包含启动云游戏: 勾选 awaken 且云游戏未就绪时, 先启动并等待画面就绪
     if "awaken" in tasks and not app_state.is_ready:
@@ -752,18 +798,56 @@ async def handle_maa_start(request: web.Request):
 
 
 async def handle_maa_settings_get(request: web.Request):
-    """返回已保存的一键长草设置(前端据此恢复表单)。"""
+    """返回已保存的一键长草设置(前端据此恢复表单)。
+
+    带 ?phone= 时返回该账号的独立配置(未单独配置则回落到全局设置),
+    便于前端按账号切换编辑。
+    """
+    phone = normalize_phone(request.query.get("phone"))
+    if phone and accounts_store.get(phone):
+        return web.json_response({
+            "status": "ok",
+            "settings": _settings_for_account(phone),
+            "account": mask_phone(phone),
+        })
     return web.json_response({"status": "ok", "settings": maa_settings.get()})
 
 
 async def handle_maa_settings_save(request: web.Request):
-    """合并保存一键长草设置(前端表单改动时调用)。"""
+    """合并保存一键长草设置。
+
+    - 不带 ?phone=: 保存全局设置(与旧版行为一致);
+    - 带 ?phone=: 运行配置(tasks/fight/annihilation/infrast/signin/inventory/award)
+      保存为该账号的独立配置; daily(每日定时)仍保存为全局设置。
+    """
+    phone = normalize_phone(request.query.get("phone"))
     try:
         patch = await request.json()
     except (json.JSONDecodeError, AttributeError):
         return web.json_response({"status": "error", "message": "Invalid request body"}, status=400)
     if not isinstance(patch, dict):
         return web.json_response({"status": "error", "message": "settings must be an object"}, status=400)
+    if phone and not accounts_store.get(phone):
+        return web.json_response({"status": "error", "message": "账号不存在"}, status=400)
+
+    if phone:
+        # 账号独立配置: 运行字段 + 每周执行日写入账号; daily 的 enabled/time 仍归全局
+        run_patch = {key: patch[key] for key in _RUN_SETTING_KEYS if key in patch}
+        daily_patch = patch.get("daily")
+        if isinstance(daily_patch, dict):
+            if "weekdays" in daily_patch:
+                run_patch["weekdays"] = daily_patch["weekdays"]
+            global_daily = {k: v for k, v in daily_patch.items() if k != "weekdays"}
+            if global_daily:
+                before_daily = maa_settings.get().get("daily") or {}
+                updated = maa_settings.update({"daily": global_daily})
+                after_daily = updated.get("daily") or {}
+                if after_daily != before_daily:
+                    _print_daily_status(after_daily)
+        account_settings.update(phone, run_patch)
+        return web.json_response(
+            {"status": "ok", "settings": _settings_for_account(phone)})
+
     before_daily = maa_settings.get().get("daily") or {}
     updated = maa_settings.update(patch)
     # 「每日定时」有实际改动时在控制台打印最新状态(与启动横幅区分, 避免混淆)
@@ -877,14 +961,17 @@ def _multi_accounts_enabled() -> bool:
     return len(accounts_store.enabled_accounts()) >= 2
 
 
-async def _run_multi_account_flow(trigger: str, tasks: list, options: dict,
-                                  do_signin: bool) -> None:
+async def _run_multi_account_flow(trigger: str,
+                                  respect_weekdays: bool = False) -> None:
     """多账号轮流执行: 逐个账号「切换登录 → 启动云游戏 → 一键长草 → 断开」。
 
     说明:
+    - 每个账号使用自己的独立配置(account_settings 覆盖全局设置), 互不影响;
+    - respect_weekdays=True(每日定时)时, 跳过今天不在该账号「每周执行日」中的账号;
+      手动执行/测试执行不传该参数, 所有启用账号都会执行;
     - 切换账号必须重建云游戏会话(旧会话属于上一个账号), 因此每个账号开始前
       先断开已有连接, 结束后也主动断开, 再进入下一个账号;
-    - 单个账号启动失败/超时不阻断后续账号, 仅记录日志并继续;
+    - 单个账号启动失败/超时/未启用任务不阻断后续账号, 仅记录日志并继续;
     - 停止请求(handle_maa_stop)会终止当前账号并跳过剩余账号。
     """
     global _multi_stop_requested, _multi_progress
@@ -893,6 +980,7 @@ async def _run_multi_account_flow(trigger: str, tasks: list, options: dict,
     maa_log = coord.status
     accounts = accounts_store.enabled_accounts()
     total = len(accounts)
+    today = datetime.datetime.now().isoweekday()
     _multi_stop_requested = False
     _multi_progress = {"running": True, "index": 0, "total": total, "phone": ""}
     maa_log.log(f"{trigger}: 多账号轮流执行开始(共 {total} 个账号)")
@@ -906,6 +994,20 @@ async def _run_multi_account_flow(trigger: str, tasks: list, options: dict,
             label = mask_phone(phone)
             _multi_progress = {"running": True, "index": idx,
                                "total": total, "phone": label}
+
+            # 每日定时: 仅执行今天在其「每周执行日」中的账号
+            if respect_weekdays and today not in _weekdays_for_account(phone):
+                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 今日"
+                            f"({_WEEKDAY_NAMES[today - 1]})不在执行日, 跳过")
+                continue
+
+            # 0) 取该账号的独立配置(未单独配置时回落到全局设置)
+            acc_cfg = _settings_for_account(phone)
+            acc_tasks, acc_opts = _run_options_from_settings(acc_cfg)
+            acc_signin = bool((acc_cfg.get("signin") or {}).get("enabled", False))
+            if not acc_tasks:
+                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 未启用任何任务, 跳过")
+                continue
             maa_log.log(f"{trigger}: [{idx}/{total}] 切换到账号 {label}, 启动云游戏...")
 
             # 1) 切换为当前账号: token 落盘 + 进程内更新(供启动云游戏复用)
@@ -925,9 +1027,9 @@ async def _run_multi_account_flow(trigger: str, tasks: list, options: dict,
                 await _handle_exit_internal()
                 continue
 
-            # 3) 执行一键长草(带入该账号 token, 保证签到等使用当前账号)
+            # 3) 执行一键长草(任务与选项均来自该账号的独立配置)
             started = coord.start(
-                tasks, options=options, signin=do_signin, token=acc["token"],
+                acc_tasks, options=acc_opts, signin=acc_signin, token=acc["token"],
                 keep_log=True, title=f"账号 {label} ({idx}/{total})")
             if not started:
                 maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 一键长草启动失败")
@@ -962,7 +1064,7 @@ async def _run_multi_account_flow(trigger: str, tasks: list, options: dict,
         maa_log.log(f"{trigger}: 多账号轮流执行结束")
 
 
-async def _run_daily_flow(trigger: str) -> tuple:
+async def _run_daily_flow(trigger: str, respect_weekdays: bool = False) -> tuple:
     """执行一次「启动云游戏 → 一键长草 → 结束后断开云游戏」流程。
 
     每日定时与「测试执行」共用。任务结束后自动断开云游戏以节省时长与流量;
@@ -971,6 +1073,8 @@ async def _run_daily_flow(trigger: str) -> tuple:
 
     Args:
         trigger: 触发来源描述(写入一键长草日志)
+        respect_weekdays: 是否按账号的每周执行日过滤(仅每日定时为 True;
+                          「测试执行」应忽略执行日, 立即运行)
 
     Returns:
         (ok, message): ok 表示一键长草是否成功启动
@@ -979,28 +1083,20 @@ async def _run_daily_flow(trigger: str) -> tuple:
     if _multi_busy() or _get_coord().running:
         maa_log.log(f"{trigger}: 已有一键长草任务在运行, 跳过本次触发")
         return False, "已有一键长草任务在运行"
-    cfg = maa_settings.get()
-    # 组装任务: 已启用开关 + 可选剿灭
-    enabled = [k for k, v in (cfg.get("tasks") or {}).items() if v]
-    if (cfg.get("annihilation") or {}).get("enabled"):
-        enabled.append("annihilation")
 
-    # 多账号模式: 每个账号各自「启动云游戏 → 一键长草 → 断开」, 后台串行执行
+    # 多账号模式: 每个账号使用自己的独立配置, 后台串行执行
     if _multi_accounts_enabled():
-        if not enabled:
-            maa_log.log(f"{trigger}: 未启用任何任务, 已跳过一键长草")
-            return False, "未启用任何任务"
-        opts = {"fight": cfg["fight"], "annihilation": cfg["annihilation"],
-                "infrast": cfg["infrast"], "award": cfg["award"],
-                # 库存保持: 定时执行同样按已保存的保持项规划(扫描仓库 -> 补缺口)
-                "inventory": cfg.get("inventory") or {}}
-        do_signin = bool((cfg.get("signin") or {}).get("enabled", False))
         global _multi_flow_task
         _multi_flow_task = _spawn_bg(
-            _run_multi_account_flow(trigger, enabled, opts, do_signin))
+            _run_multi_account_flow(trigger, respect_weekdays=respect_weekdays))
         maa_log.log(f"{trigger}: 多账号轮流执行已开始, 共 "
                     f"{len(accounts_store.enabled_accounts())} 个账号")
         return True, "多账号任务已启动"
+
+    # 单账号: 使用当前账号的配置(未单独配置时回落到全局设置)
+    cfg = _settings_for_account(accounts_store.current_phone())
+    enabled, opts = _run_options_from_settings(cfg)
+    do_signin = bool((cfg.get("signin") or {}).get("enabled", False))
 
     # 启动前先记录连接归属: owned=True 表示由本次流程负责启动并在结束后断开
     owned = _cloud_game_owned_by_flow()
@@ -1019,11 +1115,6 @@ async def _run_daily_flow(trigger: str) -> tuple:
         await _auto_exit_cloud_game(trigger, owned, maa_log)
         return False, "未启用任何任务"
 
-    opts = {"fight": cfg["fight"], "annihilation": cfg["annihilation"],
-            "infrast": cfg["infrast"], "award": cfg["award"],
-            # 库存保持: 定时执行同样按已保存的保持项规划(扫描仓库 -> 补缺口)
-            "inventory": cfg.get("inventory") or {}}
-    do_signin = bool((cfg.get("signin") or {}).get("enabled", False))
     started = _get_coord().start(enabled, options=opts, signin=do_signin,
                                  token=app_state.token or read_token(TOKEN_FILE))
     if not started:
@@ -1066,6 +1157,63 @@ async def handle_maa_daily_test(request: web.Request):
         {"status": "ok", "message": "测试执行已开始(启动云游戏 → 一键长草), 请查看日志"})
 
 
+# 星期中文名(ISO: 1=周一 ... 7=周日), 供每日定时展示与日志使用
+_WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _normalize_weekdays(raw) -> set:
+    """把设置中的「每周执行日」规整为 ISO 星期集合 {1..7}。
+
+    说明:
+    - 非列表(旧配置/异常写入)按每天处理, 保持原有"每日执行"语义;
+    - 空列表表示不执行任何一天(定时不会触发);
+    - 非法值(越界/非数字)忽略。
+    """
+    if not isinstance(raw, list):
+        return set(range(1, 8))
+    days = set()
+    for item in raw:
+        try:
+            day = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= day <= 7:
+            days.add(day)
+    return days
+
+
+def _format_weekdays(raw) -> str:
+    """把每周执行日格式化为可读文本: 每天 / 未选择执行日 / 周一/周三/周五。"""
+    days = _normalize_weekdays(raw)
+    if len(days) == 7:
+        return "每天"
+    if not days:
+        return "未选择执行日"
+    return "/".join(_WEEKDAY_NAMES[d - 1] for d in sorted(days))
+
+
+def _weekdays_for_account(phone: str) -> set:
+    """返回账号生效的每周执行日: 账号独立配置优先, 未配置回落到全局设置。"""
+    if phone:
+        stored = account_settings.get_weekdays(phone)
+        if stored is not None:
+            return set(stored)
+    return _normalize_weekdays(
+        (maa_settings.get().get("daily") or {}).get("weekdays"))
+
+
+def _day_has_work(day: int) -> bool:
+    """判断指定 ISO 星期是否有账号需要执行。
+
+    - 多账号模式: 任一启用账号的执行日包含该天即触发;
+    - 单账号模式: 当前账号的执行日包含该天即触发。
+    """
+    if _multi_accounts_enabled():
+        return any(day in _weekdays_for_account(acc["phone"])
+                   for acc in accounts_store.enabled_accounts())
+    return day in _weekdays_for_account(accounts_store.current_phone())
+
+
 def _print_daily_status(daily: dict) -> None:
     """打印每日定时任务的当前状态(启动横幅与设置变更时共用)。
 
@@ -1074,8 +1222,13 @@ def _print_daily_status(daily: dict) -> None:
       - 之后每次通过网页控制台改动「每日定时」都会重新打印
     """
     time_str = str(daily.get("time") or "08:00")
+    days_text = _format_weekdays(daily.get("weekdays"))
+    custom_days = sum(1 for p in account_settings.phones()
+                      if account_settings.get_weekdays(p) is not None)
+    if custom_days:
+        days_text += f", {custom_days} 个账号自定义执行日"
     if daily.get("enabled"):
-        print(f"{Colors.GREEN}[OK] 每日定时任务: 已启用(每天 {time_str} 自动执行)"
+        print(f"{Colors.GREEN}[OK] 每日定时任务: 已启用({days_text} {time_str} 自动执行)"
               f"{Colors.RESET}", flush=True)
     else:
         print(f"{Colors.YELLOW}[--] 每日定时任务: 未启用(可在网页控制台「每日定时执行」开启)"
@@ -1085,7 +1238,8 @@ def _print_daily_status(daily: dict) -> None:
 async def daily_checker():
     """每日定时任务: 到达设置时间且当天未执行过时, 自动启动云游戏并一键长草。
 
-    触发时机: 设置 enable=true 且当前 HH:MM == daily.time 且 last_daily_run != 今天。
+    触发时机: enable=true 且当前 HH:MM == daily.time 且 last_daily_run != 今天,
+              且当天有账号需要执行(每周执行日按账号配置, 未配置回落全局)。
     """
     while True:
         try:
@@ -1095,10 +1249,13 @@ async def daily_checker():
                 now = datetime.datetime.now()
                 hhmm = now.strftime("%H:%M")
                 today = now.strftime("%Y-%m-%d")
-                if hhmm == str(daily.get("time", "")) and cfg.get("last_daily_run") != today:
-                    logging.info("每日定时触发: %s, 开始自动执行", hhmm)
+                if (hhmm == str(daily.get("time", ""))
+                        and cfg.get("last_daily_run") != today
+                        and _day_has_work(now.isoweekday())):
+                    logging.info("每日定时触发: %s, 开始自动执行(按账号执行日过滤)", hhmm)
                     maa_settings.update({"last_daily_run": today})
-                    await _run_daily_flow(f"每日定时任务触发({hhmm})")
+                    await _run_daily_flow(
+                        f"每日定时任务触发({hhmm})", respect_weekdays=True)
             await asyncio.sleep(30)   # 每 30 秒检查一次, 粒度足够
         except asyncio.CancelledError:
             break
@@ -1390,7 +1547,11 @@ async def handle_accounts_remove(request: web.Request):
     if not accounts_store.remove(phone):
         return web.json_response(
             {"status": "error", "message": "账号不存在"}, status=400)
+    # 同步删除该账号的独立配置(账号已移出列表, 避免残留配置影响后续同名账号)
+    removed_cfg = account_settings.remove(phone)
     message = f"已从列表移除账号 {mask_phone(phone)}"
+    if removed_cfg:
+        message += "(其独立配置已删除)"
     # 移除的是当前账号: 顺延到剩余账号(保证 token 文件与当前账号一致)
     if was_current and accounts_store.current_phone():
         ok, switch_msg = _activate_account(accounts_store.current_phone())

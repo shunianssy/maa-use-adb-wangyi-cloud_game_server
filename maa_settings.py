@@ -26,7 +26,10 @@
       "skill_summary": {"enabled": false, "count": 200},   # 技巧概要·卷3
       "battle_record_high": {"enabled": false, "count": 200},  # 高级作战记录
   },
-  "daily": {"enabled": false, "time": "08:00"},     # 每日定时执行
+  "daily": {                                        # 每日定时执行
+      "enabled": false, "time": "08:00",
+      "weekdays": [1, 2, 3, 4, 5, 6, 7]             # 每周执行日(ISO: 1=周一 ... 7=周日)
+  },
   "last_daily_run": ""                              # 上次定时执行日期(YYYY-MM-DD)
 }
 """
@@ -125,6 +128,8 @@ DEFAULT_SETTINGS: Dict = {
     "daily": {
         "enabled": False,       # 每日定时自动执行(启动云游戏 + 一键长草)
         "time": "08:00",        # 24 小时制 HH:MM
+        # 每周执行日(ISO 星期: 1=周一 ... 7=周日): 仅勾选的日子触发定时
+        "weekdays": [1, 2, 3, 4, 5, 6, 7],
     },
     "last_daily_run": "",       # 上次定时执行日期, 防止当日重复触发
 }

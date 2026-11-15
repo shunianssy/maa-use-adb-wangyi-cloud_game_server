@@ -49,6 +49,8 @@ class TestMaaSettings(unittest.TestCase):
         self.assertTrue(s["award"]["award"])
         self.assertTrue(s["award"]["mail"])
         self.assertTrue(s["award"]["orundum"])
+        # 每日定时默认每天执行(weekdays 为 ISO 星期 1~7)
+        self.assertEqual(s["daily"]["weekdays"], [1, 2, 3, 4, 5, 6, 7])
 
     def test_infrast_defaults(self):
         # 基建设置默认: 常规模式 + 全设施 + 贸易站-龙门币 + 心情阈值 0.3
@@ -120,6 +122,17 @@ class TestMaaSettings(unittest.TestCase):
             self.assertEqual(data["fight"]["times"], 9)
             self.assertEqual(data["daily"]["enabled"], True)
             self.assertEqual(data["daily"]["time"], "07:30")
+
+    def test_daily_weekdays_persisted(self):
+        # 每周执行日需可落盘并重新载入
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "maa_settings.json")
+            ms = MaaSettings(path)
+            ms.update({"daily": {"weekdays": [1, 3, 5]}})
+            data = MaaSettings(path).get()["daily"]
+            self.assertEqual(data["weekdays"], [1, 3, 5])
+            self.assertEqual(data["time"], "08:00")   # 未覆盖字段保持默认
+            self.assertFalse(data["enabled"])
 
     def test_unknown_keys_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:

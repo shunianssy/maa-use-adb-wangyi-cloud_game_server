@@ -21,11 +21,11 @@
 
 -   **网页控制台**：浏览器内实时查看云游戏画面（WebRTC 拉流、约 8 FPS 推送），支持单击点击、按住拖拽滑动（兼容触屏）、文本输入、截图保存、坐标显示。
 -   **账号登录**：网页控制台内支持「短信验证码」与「手机号 + 密码」两种登录方式（密码登录需当前 token 有效，加密流程与网页端一致）；存在 token 文件即显示「已登录」，token 自动落盘复用。
--   **多账号轮流执行**：登录过的账号自动加入账号列表（每个账号的 token 独立保存）；勾选「多账号轮流执行」后，一键长草与每日定时会按列表顺序逐个账号执行「切换账号 → 启动云游戏 → 一键长草 → 断开」，前一个账号完成后自动切换到下一个账号继续执行任务，单个账号失败/超时不影响后续账号。
+-   **多账号轮流执行**：登录过的账号自动加入账号列表（每个账号的 token 独立保存）；勾选「多账号轮流执行」后，一键长草与每日定时会按列表顺序逐个账号执行「切换账号 → 启动云游戏 → 一键长草 → 断开」，前一个账号完成后自动切换到下一个账号继续执行任务，单个账号失败/超时不影响后续账号。每个账号还可在「配置账号」下拉中单独编辑一键长草配置（任务/作战/基建/领奖/库存/签到），轮流执行时各用各的配置。
 -   **一键长草**：开始唤醒、领取奖励、自动公招、基建换班、每周剿灭、库存保持、理智作战、信用收支，按依赖顺序自动排队执行；勾选「开始唤醒」时若云游戏未连接会自动先启动云游戏；单个任务内子任务出错达到 5 次时自动跳过该任务并继续后续任务。
 -   **库存保持**：勾选后先扫描仓库（MaaCore 仓库识别），按目标库存计算缺口并规划下一次理智作战（指定关卡 + 掉落停止条件、次数 AUTO，刷够缺口或理智耗尽即停），界面显示"下次打什么、哪一关"；优先级：每周剿灭 > 库存保持 > 理智作战配置。预设保持项：低级芯片（全职业，默认 20）、高级芯片组（全职业，默认 20）、采购凭证/红票（默认 20）、技巧概要·卷3（默认 200），目标数量可修改。资源关卡按开放日轮换（芯片本 PR-A/B/C/D、AP-5、CA-5），规划时自动跳过当天未开放的关卡并在日志提示下次开放日，避免 MAA 导航到关闭关卡而卡住。
 -   **作战可配置**：关卡、战斗次数（数字 / AUTO 刷完当前理智自动停）、理智药（关 / AUTO / 指定数量）、剿灭（AUTO 刷满止 / 固定场次）、领取奖励细分项，设置即时保存到 `maa_settings.json`。
--   **每日定时执行**：到点自动「启动云游戏 → 一键长草」，当天只触发一次；旁边提供「测试执行」按钮可立即手动跑一次完整流程（不影响定时记录）。
+-   **每日定时执行**：可勾选周一至周日作为每周执行日（默认每天；执行日按账号保存），仅在勾选的星期到点自动「启动云游戏 → 一键长草」，当天只触发一次；旁边提供「测试执行」按钮可立即手动跑一次完整流程（不影响定时记录）。
 -   **云游戏签到**：一键领取网易云游戏平台每日奖励时长（接口 `POST /api/v2/sign-today`，与网页端一致）；只要已登录（有 token 文件）即可签到，无需先启动云游戏。
 -   **可视化日志**：一键长草日志实时输出，同时自动落盘 `logs/maa_*.log` 便于排查。
 -   **双通道**：HTTP API（外部脚本 / MAA 桥接）+ WebSocket（控制台画面与状态同步）。
@@ -60,6 +60,8 @@ maa_coordinator.py         # 一键长草协调器(MaaCore 在子线程执行, �
 maa_core_wrapper.py        # MaaCore 的 ctypes 封装(Windows MaaCore.dll / Linux libMaaCore.so)
 maa_settings.py            # 一键长草设置读写(原子化落盘 maa_settings.json)
 netease_login.py           # 网易云游戏登录(短信/密码)与每日签到(按线上接口抓包实现)
+accounts.py                # 多账号列表(token 存储 / 当前账号 / 轮流执行开关)
+account_settings.py        # 账号独立的一键长草运行配置(account_settings.json)
 fake_adb/                  # 假 adb 桥(Windows adb.bat / Linux adb.sh + fake_adb.py)
 maa_pipeline/              # pipeline 占位示例(真实任务请指向官方 resource)
 maa_bridge/                # MaaFramework 自定义控制器(备选桥接模式)
@@ -69,7 +71,7 @@ scripts/fetch_maa_resource.py  # MAA 核心与资源自动拉取(容器首次启
 scripts/verify_maacore.py  # 验证 MaaCore 可被 ctypes 驱动的自检脚本(跨平台)
 tests/                     # unittest 测试集
 maa_data/                  # 容器自动拉取的 MaaCore + resource(运行时生成, 已 gitignore)
-Dockerfile / docker-compose.yml / entrypoint.sh
+Dockerfile / docker-compose.yml / docker-compose.cn.yml / entrypoint.sh
 ```
 
 ---
@@ -240,8 +242,8 @@ WebSocket 端点（控制台使用）：
 | `POST` | `/maa/start` | 启动一键长草，请求体 `{"tasks": [...], "options": {...}}`（省略的作战项回落到已保存设置） |
 | `POST` | `/maa/stop` | 停止当前任务 |
 | `GET` | `/maa/status` | 任务状态快照（含云游戏连接状态与 WS 客户端数，前端轮询兜底） |
-| `GET` | `/maa/settings` | 读取已保存设置 |
-| `POST` | `/maa/settings` | 合并保存设置（前端表单改动时调用） |
+| `GET` | `/maa/settings` | 读取已保存设置；带 `?phone=138...` 时读取该账号的独立配置（未配置则回落全局） |
+| `POST` | `/maa/settings` | 合并保存设置（前端表单改动时调用）；带 `?phone=138...` 时运行配置与 `daily.weekdays` 保存到该账号，`daily.enabled/time` 仍保存为全局 |
 | `POST` | `/maa/signin` | 执行网易云游戏签到（`POST /api/v2/sign-today`；只要已登录即可，无需先启动云游戏） |
 | `POST` | `/maa/daily/test` | 「测试执行」：立即跑一次「启动云游戏 → 一键长草」（不写入 `last_daily_run`） |
 | `POST` | `/maa/adb-log` | 假 adb 命令日志上报（内部使用） |
@@ -282,6 +284,7 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111",
     -   **每日定时 / 测试执行**：同样按账号顺序执行全套流程，每个账号执行完立即断开，节省云游戏时长；
     -   单个账号启动失败或等待就绪超时会记录日志并继续下一个账号；点「停止」会终止当前账号并跳过剩余账号。
 -   账号管理接口：`GET /api/accounts`、`POST /api/accounts/switch`、`POST /api/accounts/toggle`、`POST /api/accounts/remove`、`POST /api/accounts/auto`。
+-   **账号独立配置**：一键长草卡片顶部的「配置账号」下拉可选择「默认配置」或某个账号。选中账号后，面板上的任务开关、作战、基建、领奖、库存、签到以及「每日定时」的每周执行日会保存到该账号（`account_settings.json`），切换账号互不影响；每日定时的「启用/时间」仍为全局，未单独配置的账号使用「默认配置」。多账号轮流执行时每个账号使用自己的配置与执行日（定时触发时自动跳过今天不在执行日的账号），每日定时（单账号）使用当前账号的配置。账号被移除时其独立配置会一并删除。
 
 ---
 
@@ -292,6 +295,7 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111",
 | `NETEASE_TOKEN` | 空 | 登录凭证；无交互部署时自动写入 token 文件 |
 | `NETEASE_TOKEN_FILE` | `token` | token 文件路径 |
 | `NETEASE_ACCOUNTS_FILE` | `accounts.json` | 多账号列表文件路径（含各账号 token，已加入 `.gitignore`；容器部署默认指向 `/app/data/accounts.json`） |
+| `NETEASE_ACCOUNT_SETTINGS_FILE` | `account_settings.json` | 账号独立配置文件路径（容器部署默认指向 `/app/data/account_settings.json`） |
 | `NETEASE_API_BASE` | `https://n.cg.163.com` | 云游戏开放接口根地址（网页控制台登录使用，可指向代理或测试服务） |
 | `NETEASE_GAME_CODE` | `mrfz` | 游戏代码，`mrfz` 即《明日方舟》 |
 | `NETEASE_HOST` / `NETEASE_PORT` | `127.0.0.1` / `22888` | API 服务监听地址与端口 |
@@ -369,7 +373,42 @@ git pull; docker compose up -d --build
 -   **更新 MAA 核心与资源版本**：`MAA_AUTO_PULL=force docker compose up -d`（或先 `rm -rf ./maa_data` 再启动）。
 -   **仅改环境变量 / compose 配置**：`docker compose up -d`，无需重新构建镜像。
 -   **配置不会被重置**：一键长草设置、登录 token 与运行日志默认存放在宿主机 `./data` 目录并挂载进容器（见「数据持久化」），`docker compose up -d --build` 更新重建容器后仍会保留。
+-   **国内网络加速**：把命令中的 `docker compose` 换成 `docker compose -f docker-compose.cn.yml`（使用阿里云 apt/pip 镜像），详见下节。
 -   **排查提示**：若日志出现 `ModuleNotFoundError`（如 `No module named 'maa_settings'`）或 `[entrypoint] starting server.py ...` 这类旧格式日志，说明容器仍在运行旧镜像，执行上面的 `git pull && docker compose up -d --build` 重新构建即可。
+
+### 中国大陆网络加速（阿里云镜像）
+
+国内拉取依赖 / 更新镜像较慢时，使用内置的 `docker-compose.cn.yml`：构建期 Debian APT 与 PyPI 均走阿里云镜像，运行期 MAA 核心/资源走 ghfast.top 镜像。
+
+```bash
+# 首次部署 / 更新(在项目目录执行)
+git pull
+docker compose -f docker-compose.cn.yml up -d --build
+
+# 查看日志 / 停止
+docker compose -f docker-compose.cn.yml logs -f
+docker compose -f docker-compose.cn.yml down
+```
+
+PowerShell：
+
+```powershell
+git pull
+docker compose -f docker-compose.cn.yml up -d --build
+```
+
+-   数据目录与默认配置一致（`./data`、`./maa_data`），两种 compose 文件可随时切换，账号与设置不会丢失。
+-   仅重建镜像（忽略缓存）：`docker compose -f docker-compose.cn.yml build --no-cache`。
+-   强制更新 MAA 核心/资源：`MAA_AUTO_PULL=force docker compose -f docker-compose.cn.yml up -d`。
+-   `python:3.12-slim` 基础镜像拉取仍慢时，请为 Docker daemon 配置阿里云镜像加速器（阿里云容器镜像服务控制台 → 镜像工具 → 镜像加速器可获取专属地址）：
+
+```json
+{
+  "registry-mirrors": ["https://<你的专属ID>.mirror.aliyuncs.com"]
+}
+```
+
+Linux 保存到 `/etc/docker/daemon.json` 后执行 `sudo systemctl daemon-reload && sudo systemctl restart docker`；Windows / macOS 在 Docker Desktop → Settings → Docker Engine 中填入同样的 JSON 后重启。
 
 ### MAA 自动拉取说明
 
@@ -395,6 +434,8 @@ docker run -d --name netease-maa \
   -e NETEASE_TOKEN=你的token \
   -e NETEASE_MAA_SETTINGS=/app/data/maa_settings.json \
   -e NETEASE_TOKEN_FILE=/app/data/token \
+  -e NETEASE_ACCOUNTS_FILE=/app/data/accounts.json \
+  -e NETEASE_ACCOUNT_SETTINGS_FILE=/app/data/account_settings.json \
   -e MAA_LOG_DIR=/app/data/logs \
   -v "$PWD/maa_data:/app/maa_data" \
   -v "$PWD/data:/app/data" \
@@ -433,9 +474,10 @@ docker run --rm \
 | `/app/data/maa_settings.json` | 一键长草设置 | `-v ./data:/app/data` |
 | `/app/data/token` | 登录 token | 同上 |
 | `/app/data/accounts.json` | 多账号列表与各账号 token | 同上 |
+| `/app/data/account_settings.json` | 各账号的一键长草独立配置 | 同上 |
 | `/app/data/logs` | 任务日志 | 同上 |
 
-> 手动 `docker run` 部署（方式二）时，请自行追加 `-v "$PWD/data:/app/data"` 并设置 `NETEASE_MAA_SETTINGS=/app/data/maa_settings.json`、`NETEASE_TOKEN_FILE=/app/data/token`、`NETEASE_ACCOUNTS_FILE=/app/data/accounts.json`、`MAA_LOG_DIR=/app/data/logs`。
+> 手动 `docker run` 部署（方式二）时，请自行追加 `-v "$PWD/data:/app/data"` 并设置 `NETEASE_MAA_SETTINGS=/app/data/maa_settings.json`、`NETEASE_TOKEN_FILE=/app/data/token`、`NETEASE_ACCOUNTS_FILE=/app/data/accounts.json`、`NETEASE_ACCOUNT_SETTINGS_FILE=/app/data/account_settings.json`、`MAA_LOG_DIR=/app/data/logs`。
 
 ### 访问与验证
 
@@ -462,7 +504,7 @@ docker run --rm \
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-覆盖内容：一键长草参数构造与任务状态机、假 adb 命令翻译、设置读写与原子落盘、控制器契约、端口占用清理、MAA 自动拉取（版本 API 解析 / 镜像回退 / 断点续传 / 解压安装）、MaaCore 跨平台默认值等。
+覆盖内容：一键长草参数构造与任务状态机、多账号与账号独立配置、假 adb 命令翻译、设置读写与原子落盘、控制器契约、端口占用清理、MAA 自动拉取（版本 API 解析 / 镜像回退 / 断点续传 / 解压安装）、MaaCore 跨平台默认值等。
 
 ---
 

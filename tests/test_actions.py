@@ -6,6 +6,7 @@ do_click / do_swipe / do_input 与 status_payload, 不依赖真实云游戏连�
 """
 
 import asyncio
+import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -233,6 +234,122 @@ class DailyFlowAutoCloseTest(unittest.IsolatedAsyncioTestCase):
             ok, msg = await server._run_daily_flow("每日定时")
         self.assertTrue(ok)
         m_spawn.assert_called_once()
+
+
+class TestWeekdays(unittest.TestCase):
+    """每日定时「每周执行日」(daily.weekdays)的规整与展示。"""
+
+    def test_normalize_weekdays(self):
+        self.assertEqual(server._normalize_weekdays([1, 3, 7]), {1, 3, 7})
+        # 越界/非数字忽略
+        self.assertEqual(server._normalize_weekdays([0, 8, "x", "2"]), {2})
+        # 空列表: 不执行任何一天
+        self.assertEqual(server._normalize_weekdays([]), set())
+        # 旧设置缺失该字段(非列表): 按每天执行, 保持原有语义
+        self.assertEqual(server._normalize_weekdays(None), set(range(1, 8)))
+
+    def test_format_weekdays(self):
+        self.assertEqual(server._format_weekdays([1, 2, 3, 4, 5, 6, 7]), "每天")
+        self.assertEqual(server._format_weekdays([]), "未选择执行日")
+        self.assertEqual(server._format_weekdays([3, 1]), "周一/周三")
+
+
+class TestAccountRunSettings(unittest.TestCase):
+    """账号独立配置: 执行参数提取与按账号合并设置。"""
+
+    def test_run_options_from_settings(self):
+        cfg = {
+            "tasks": {"awaken": True, "combat": False, "credit": True},
+            "annihilation": {"enabled": True, "auto": True},
+            "fight": {"stage": "1-7"},
+            "infrast": {"mode": 0},
+            "award": {"award": True},
+            "inventory": {"chip_low": {"enabled": False}},
+        }
+        tasks, opts = server._run_options_from_settings(cfg)
+        # 剿灭由 annihilation.enabled 追加(不依赖 tasks 开关)
+        self.assertEqual(tasks, ["awaken", "credit", "annihilation"])
+        self.assertEqual(opts["fight"], {"stage": "1-7"})
+        self.assertIn("infrast", opts)
+        self.assertIn("inventory", opts)
+
+    def test_settings_for_account_merges_override(self):
+        import tempfile
+        from account_settings import AccountSettingsStore
+        from maa_settings import default_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AccountSettingsStore(os.path.join(tmp, "account_settings.json"))
+            store.update("13800001111", {"fight": {"stage": "CE-6"}})
+            with patch.object(server, "account_settings", store), \
+                 patch.object(server.maa_settings, "get",
+                              return_value=default_settings()):
+                account_cfg = server._settings_for_account("13800001111")
+                default_cfg = server._settings_for_account("")
+        # 账号覆盖生效, 未覆盖字段回落全局默认
+        self.assertEqual(account_cfg["fight"]["stage"], "CE-6")
+        self.assertEqual(account_cfg["fight"]["times"], 5)
+        # 空手机号直接返回全局设置
+        self.assertEqual(default_cfg["fight"]["stage"], "")
+
+
+class TestAccountWeekdays(unittest.TestCase):
+    """每日定时: 每周执行日按账号生效(未配置回落全局)。"""
+
+    def test_weekdays_for_account_override_and_fallback(self):
+        import tempfile
+        from account_settings import AccountSettingsStore
+        from maa_settings import default_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AccountSettingsStore(os.path.join(tmp, "account_settings.json"))
+            store.update("13800001111", {"weekdays": [2, 4]})
+            base = default_settings()
+            base["daily"]["weekdays"] = [1, 5]
+            with patch.object(server, "account_settings", store), \
+                 patch.object(server.maa_settings, "get", return_value=base):
+                # 账号独立配置优先
+                self.assertEqual(server._weekdays_for_account("13800001111"), {2, 4})
+                # 未配置的账号回落到全局
+                self.assertEqual(server._weekdays_for_account("13900002222"), {1, 5})
+                self.assertEqual(server._weekdays_for_account(""), {1, 5})
+
+    def test_day_has_work_single_account(self):
+        import tempfile
+        from account_settings import AccountSettingsStore
+        from maa_settings import default_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AccountSettingsStore(os.path.join(tmp, "account_settings.json"))
+            store.update("13800001111", {"weekdays": [2]})
+            with patch.object(server, "account_settings", store), \
+                 patch.object(server.maa_settings, "get",
+                              return_value=default_settings()), \
+                 patch.object(server, "_multi_accounts_enabled", return_value=False), \
+                 patch.object(server.accounts_store, "current_phone",
+                              return_value="13800001111"):
+                self.assertTrue(server._day_has_work(2))
+                self.assertFalse(server._day_has_work(1))
+
+    def test_day_has_work_multi_accounts(self):
+        import tempfile
+        from account_settings import AccountSettingsStore
+        from maa_settings import default_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AccountSettingsStore(os.path.join(tmp, "account_settings.json"))
+            store.update("13800001111", {"weekdays": [2]})
+            store.update("13900002222", {"weekdays": [4]})
+            with patch.object(server, "account_settings", store), \
+                 patch.object(server.maa_settings, "get",
+                              return_value=default_settings()), \
+                 patch.object(server, "_multi_accounts_enabled", return_value=True), \
+                 patch.object(server.accounts_store, "enabled_accounts",
+                              return_value=[{"phone": "13800001111"},
+                                            {"phone": "13900002222"}]):
+                self.assertTrue(server._day_has_work(2))
+                self.assertTrue(server._day_has_work(4))
+                self.assertFalse(server._day_has_work(1))
 
 
 if __name__ == "__main__":

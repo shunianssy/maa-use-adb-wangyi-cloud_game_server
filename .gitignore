@@ -1,5 +1,6 @@
 token*
 accounts.json
+account_settings.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
