@@ -295,9 +295,12 @@ class TestMaaCoordinator(unittest.TestCase):
                         mc.TASK_EXEC_ORDER.index("inventory"))
         self.assertLess(mc.TASK_EXEC_ORDER.index("inventory"),
                         mc.TASK_EXEC_ORDER.index("combat"))
-        # 「领取奖励」需在库存保持之前(先领完奖励再扫描仓库, 邮件/任务材料计入库存)
-        self.assertLess(mc.TASK_EXEC_ORDER.index("reward"),
-                        mc.TASK_EXEC_ORDER.index("inventory"))
+        # 主任务顺序: 唤醒 → 公招 → 基建 → 理智作战 → 信用收支 → 领取奖励
+        main_seq = ["awaken", "recruit", "infrast", "combat", "credit", "reward"]
+        main_indexes = [mc.TASK_EXEC_ORDER.index(k) for k in main_seq]
+        self.assertEqual(main_indexes, sorted(main_indexes))
+        # 「领取奖励」排在最后
+        self.assertEqual(mc.TASK_EXEC_ORDER[-1], "reward")
 
     def test_start_runs_thread_and_passes_options(self):
         # 不连真实 MaaCore: 替换 _run 为记录参数的桩, 验证 start 透传 options

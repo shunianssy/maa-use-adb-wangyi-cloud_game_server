@@ -138,13 +138,13 @@ DEFAULT_TASK_MAP = {
     "reward": "Award",            # 领取奖励
 }
 
-# 优先顺序: 因果依赖前置(先唤醒 → 领取奖励 → 剿灭 → 库存保持 → 理智作战 ...)
+# 执行顺序: 开始唤醒 → 自动公招 → 基建换班 → 理智作战 → 信用收支 → 领取奖励。
 # 剿灭放在理智作战之前, 保证先清掉本周剿灭再刷普通关;
 # 库存保持放在剿灭之后、理智作战之前(优先级: 每周剿灭 > 库存保持 > 理智作战配置):
 # 勾选后先按仓库缺口规划并刷关, 剩余理智再由理智作战按用户配置的关卡消耗。
 TASK_EXEC_ORDER = [
-    "awaken", "reward", "recruit", "infrast", "annihilation", "inventory", "combat",
-    "credit",
+    "awaken", "recruit", "infrast", "annihilation", "inventory", "combat",
+    "credit", "reward",
 ]
 
 # 任务 key -> 中文展示名(日志/状态栏使用)
