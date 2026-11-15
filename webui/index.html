@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>网易云游戏 · MAA 远程控制台</title>
-  <link rel="stylesheet" href="/static/style.css?v=5" />
+  <link rel="stylesheet" href="/static/style.css?v=6" />
 </head>
 <body>
   <header class="topbar">
@@ -73,7 +73,22 @@
                  placeholder="账号密码" autocomplete="current-password" />
           <button id="btnLoginPwdSubmit" class="btn btn-primary" type="button">登录</button>
         </div>
-        <p class="tool-note" id="loginNote">登录成功后 token 自动保存, 启动云游戏时自动使用</p>
+        <p class="tool-note" id="loginNote">登录成功后 token 自动保存并加入下方账号列表, 启动云游戏时自动使用</p>
+
+        <!-- 多账号: 登录过的账号自动加入列表, 可设当前账号与轮流执行 -->
+        <div class="account-section">
+          <div class="account-head">
+            <h3>账号列表</h3>
+            <label class="inline-check">
+              <input type="checkbox" id="multiAccountEnabled" /><span>多账号轮流执行</span>
+            </label>
+          </div>
+          <ul id="accountList" class="account-list" aria-live="polite"></ul>
+          <p class="tool-note" id="multiAccountNote">
+            勾选后按列表顺序执行: 切换账号 → 启动云游戏 → 一键长草 → 断开;
+            删除仅移出轮流列表, 不影响当前登录
+          </p>
+        </div>
       </div>
 
       <!-- 一键长草: 任务开关 + 各任务设置 -->
@@ -365,6 +380,6 @@
   </main>
 
   <!-- v= 版本号用于强制刷新静态资源(避免改版后浏览器复用旧缓存) -->
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>

@@ -28,9 +28,11 @@ from sdk.wsconnect import (
 from maa_settings import MaaSettings
 # 登录与签到统一走 netease_login(按线上接口抓包修正, 替代 sdk/signin.py 的探测式实现)
 from netease_login import (
-    login_with_captcha, login_with_password, netease_signin,
-    read_token, request_sms_code, save_token,
+    login_with_captcha, login_with_password, netease_signin, mask_phone,
+    normalize_phone, read_token, request_sms_code, save_token,
 )
+# 多账号: 保存多个账号 token, 支持按列表顺序轮流执行一键长草
+from accounts import AccountStore
 
 # --- 配置 ---
 # 服务器端部署时可通过环境变量覆盖以下配置(见 Docker/生产环境使用方式)
@@ -40,6 +42,10 @@ GAME_CODE = os.environ.get("NETEASE_GAME_CODE", "mrfz")
 TOKEN_FILE = os.environ.get(
     "NETEASE_TOKEN_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "token"))
+# 多账号列表文件: 保存每个账号的 token 与轮流执行开关(已加入 .gitignore)
+ACCOUNTS_FILE = os.environ.get(
+    "NETEASE_ACCOUNTS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.json"))
 HOST = os.environ.get("NETEASE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NETEASE_PORT", "22888"))
 WIDTH = int(os.environ.get("NETEASE_WIDTH", "1280"))
@@ -60,6 +66,9 @@ DAILY_FLOW_MAX_WAIT = int(os.environ.get("NETEASE_DAILY_FLOW_MAX_WAIT", str(4 * 
 
 # 一键长草设置实例(启动即加载; 每日定时任务读取它做触发)
 maa_settings = MaaSettings(NETEASE_MAA_SETTINGS)
+
+# 多账号列表实例(启动即加载; 登录成功后自动登记, 轮流执行时按顺序切换)
+accounts_store = AccountStore(ACCOUNTS_FILE)
 
 # --- 颜色定义 ---
 class Colors:
@@ -149,6 +158,11 @@ app_state = AppState()
 from maa_coordinator import MaaCoordinator
 maa_coord = None  # 惰性初始化, 在 run_server 中创建(需 HOST/PORT 确定后)
 _daily_checker_task: Optional[asyncio.Task] = None  # 每日定时检查协程
+
+# 多账号轮流执行状态: 后台流程任务 / 停止标志 / 进度(供 /maa/status 展示)
+_multi_flow_task: Optional[asyncio.Task] = None
+_multi_stop_requested = False
+_multi_progress: dict = {"running": False, "index": 0, "total": 0, "phone": ""}
 
 # 活跃 WebUI WebSocket 客户端集合(用于状态主动广播)
 _ws_clients: set = set()
@@ -685,8 +699,33 @@ async def handle_maa_start(request: web.Request):
     if not isinstance(tasks, list) or not tasks:
         return web.json_response({"status": "error", "message": "请至少启用一个任务"}, status=400)
 
-    # 「开始唤醒」包含启动云游戏: 勾选 awaken 且云游戏未就绪时, 先启动并等待画面就绪
+    # 运行选项与已保存设置合并: 表单值优先, 缺失字段用设置默认
+    saved = maa_settings.get()
+    merged = {
+        "fight": {**saved["fight"], **(options.get("fight") or {})},
+        "annihilation": {**saved["annihilation"], **(options.get("annihilation") or {})},
+        "infrast": {**saved["infrast"], **(options.get("infrast") or {})},
+        "signin": {**saved["signin"], **(options.get("signin") or {})},
+        "award": {**saved["award"], **(options.get("award") or {})},
+        # 库存保持: 前端每次提交全量保持项(每项 enabled/count), 外层键级覆盖即可
+        "inventory": {**saved.get("inventory", {}), **(options.get("inventory") or {})},
+    }
+    do_signin = bool(merged.get("signin", {}).get("enabled", False))
+
     coord = _get_coord()
+    # 多账号模式: 后台按账号列表顺序逐个「切换账号 → 启动云游戏 → 一键长草 → 断开」
+    if _multi_accounts_enabled():
+        if coord.running or _multi_busy():
+            return web.json_response(
+                {"status": "error", "message": "已有一键长草任务在运行"}, status=400)
+        global _multi_flow_task
+        _multi_flow_task = _spawn_bg(_run_multi_account_flow(
+            "一键长草(多账号)", tasks, merged, do_signin))
+        coord.status.log("多账号轮流执行已开始: 按账号列表顺序逐个执行一键长草")
+        return web.json_response(
+            {"status": "ok", "message": "多账号任务已开始(依次切换账号执行)"})
+
+    # 「开始唤醒」包含启动云游戏: 勾选 awaken 且云游戏未就绪时, 先启动并等待画面就绪
     if "awaken" in tasks and not app_state.is_ready:
         if not (app_state.token or read_token(TOKEN_FILE)):
             return web.json_response(
@@ -704,19 +743,6 @@ async def handle_maa_start(request: web.Request):
                 status=400)
         coord.status.log("云游戏已就绪, 开始执行一键长草")
 
-    # 运行选项与已保存设置合并: 表单值优先, 缺失字段用设置默认
-    saved = maa_settings.get()
-    merged = {
-        "fight": {**saved["fight"], **(options.get("fight") or {})},
-        "annihilation": {**saved["annihilation"], **(options.get("annihilation") or {})},
-        "infrast": {**saved["infrast"], **(options.get("infrast") or {})},
-        "signin": {**saved["signin"], **(options.get("signin") or {})},
-        "award": {**saved["award"], **(options.get("award") or {})},
-        # 库存保持: 前端每次提交全量保持项(每项 enabled/count), 外层键级覆盖即可
-        "inventory": {**saved.get("inventory", {}), **(options.get("inventory") or {})},
-    }
-
-    do_signin = bool(merged.get("signin", {}).get("enabled", False))
     started = coord.start(tasks, options=merged, signin=do_signin,
                           token=app_state.token or read_token(TOKEN_FILE))
     if not started:
@@ -839,11 +865,109 @@ async def _watch_flow_and_exit_cloud_game(trigger: str, owned: bool, maa_log) ->
     await _auto_exit_cloud_game(trigger, owned, maa_log)
 
 
+def _multi_busy() -> bool:
+    """多账号轮流执行流程是否正在进行。"""
+    return _multi_flow_task is not None and not _multi_flow_task.done()
+
+
+def _multi_accounts_enabled() -> bool:
+    """是否启用多账号轮流执行(需开关开启且至少 2 个启用账号)。"""
+    if not accounts_store.auto_switch:
+        return False
+    return len(accounts_store.enabled_accounts()) >= 2
+
+
+async def _run_multi_account_flow(trigger: str, tasks: list, options: dict,
+                                  do_signin: bool) -> None:
+    """多账号轮流执行: 逐个账号「切换登录 → 启动云游戏 → 一键长草 → 断开」。
+
+    说明:
+    - 切换账号必须重建云游戏会话(旧会话属于上一个账号), 因此每个账号开始前
+      先断开已有连接, 结束后也主动断开, 再进入下一个账号;
+    - 单个账号启动失败/超时不阻断后续账号, 仅记录日志并继续;
+    - 停止请求(handle_maa_stop)会终止当前账号并跳过剩余账号。
+    """
+    global _multi_stop_requested, _multi_progress
+
+    coord = _get_coord()
+    maa_log = coord.status
+    accounts = accounts_store.enabled_accounts()
+    total = len(accounts)
+    _multi_stop_requested = False
+    _multi_progress = {"running": True, "index": 0, "total": total, "phone": ""}
+    maa_log.log(f"{trigger}: 多账号轮流执行开始(共 {total} 个账号)")
+
+    try:
+        for idx, acc in enumerate(accounts, 1):
+            if _multi_stop_requested:
+                maa_log.log(f"{trigger}: 收到停止请求, 终止剩余账号")
+                break
+            phone = acc["phone"]
+            label = mask_phone(phone)
+            _multi_progress = {"running": True, "index": idx,
+                               "total": total, "phone": label}
+            maa_log.log(f"{trigger}: [{idx}/{total}] 切换到账号 {label}, 启动云游戏...")
+
+            # 1) 切换为当前账号: token 落盘 + 进程内更新(供启动云游戏复用)
+            accounts_store.set_current(phone)
+            if not save_token(acc["token"], TOKEN_FILE):
+                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} token 落盘失败, 仍尝试启动")
+            await _handle_exit_internal()
+            app_state.token = acc["token"]
+
+            # 2) 用该账号启动云游戏并等待画面就绪
+            ok, msg = await _handle_start_internal()
+            if not ok:
+                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 启动云游戏失败: {msg}")
+                continue
+            if not await _wait_game_ready(90):
+                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 等待云游戏就绪超时")
+                await _handle_exit_internal()
+                continue
+
+            # 3) 执行一键长草(带入该账号 token, 保证签到等使用当前账号)
+            started = coord.start(
+                tasks, options=options, signin=do_signin, token=acc["token"],
+                keep_log=True, title=f"账号 {label} ({idx}/{total})")
+            if not started:
+                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 一键长草启动失败")
+                await _handle_exit_internal()
+                continue
+
+            while coord.running:
+                if _multi_stop_requested:
+                    coord.stop()
+                    break
+                await asyncio.sleep(5)
+
+            maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 执行结束")
+            # 4) 断开本账号会话, 避免下一个账号复用旧会话
+            await _handle_exit_internal()
+            if _multi_stop_requested:
+                maa_log.log(f"{trigger}: 收到停止请求, 终止剩余账号")
+                break
+            await asyncio.sleep(2)   # 留出会话释放时间, 避免紧接着连接被服务端拒绝
+    except asyncio.CancelledError:
+        maa_log.log(f"{trigger}: 多账号执行被取消")
+        raise
+    except Exception as e:
+        logging.exception("多账号轮流执行异常")
+        maa_log.log(f"{trigger}: 多账号执行异常: {e}")
+    finally:
+        try:
+            await _handle_exit_internal()
+        except (asyncio.CancelledError, Exception):
+            pass   # 服务关闭/任务取消时尽力断开, 不阻断收尾
+        _multi_progress = {"running": False, "index": 0, "total": 0, "phone": ""}
+        maa_log.log(f"{trigger}: 多账号轮流执行结束")
+
+
 async def _run_daily_flow(trigger: str) -> tuple:
     """执行一次「启动云游戏 → 一键长草 → 结束后断开云游戏」流程。
 
     每日定时与「测试执行」共用。任务结束后自动断开云游戏以节省时长与流量;
     仅当云游戏连接由本次流程自行启动时才断开, 避免误断用户手动开启的会话。
+    开启「多账号轮流执行」时改为后台跑多账号流程(每个账号各走一遍上述流程)。
 
     Args:
         trigger: 触发来源描述(写入一键长草日志)
@@ -852,6 +976,32 @@ async def _run_daily_flow(trigger: str) -> tuple:
         (ok, message): ok 表示一键长草是否成功启动
     """
     maa_log = _get_coord().status
+    if _multi_busy() or _get_coord().running:
+        maa_log.log(f"{trigger}: 已有一键长草任务在运行, 跳过本次触发")
+        return False, "已有一键长草任务在运行"
+    cfg = maa_settings.get()
+    # 组装任务: 已启用开关 + 可选剿灭
+    enabled = [k for k, v in (cfg.get("tasks") or {}).items() if v]
+    if (cfg.get("annihilation") or {}).get("enabled"):
+        enabled.append("annihilation")
+
+    # 多账号模式: 每个账号各自「启动云游戏 → 一键长草 → 断开」, 后台串行执行
+    if _multi_accounts_enabled():
+        if not enabled:
+            maa_log.log(f"{trigger}: 未启用任何任务, 已跳过一键长草")
+            return False, "未启用任何任务"
+        opts = {"fight": cfg["fight"], "annihilation": cfg["annihilation"],
+                "infrast": cfg["infrast"], "award": cfg["award"],
+                # 库存保持: 定时执行同样按已保存的保持项规划(扫描仓库 -> 补缺口)
+                "inventory": cfg.get("inventory") or {}}
+        do_signin = bool((cfg.get("signin") or {}).get("enabled", False))
+        global _multi_flow_task
+        _multi_flow_task = _spawn_bg(
+            _run_multi_account_flow(trigger, enabled, opts, do_signin))
+        maa_log.log(f"{trigger}: 多账号轮流执行已开始, 共 "
+                    f"{len(accounts_store.enabled_accounts())} 个账号")
+        return True, "多账号任务已启动"
+
     # 启动前先记录连接归属: owned=True 表示由本次流程负责启动并在结束后断开
     owned = _cloud_game_owned_by_flow()
     maa_log.log(f"{trigger}: 启动云游戏...")
@@ -864,11 +1014,6 @@ async def _run_daily_flow(trigger: str) -> tuple:
         await _auto_exit_cloud_game(trigger, owned, maa_log)  # 就绪失败也要释放连接
         return False, "等待云游戏就绪超时"
 
-    cfg = maa_settings.get()
-    # 组装任务: 已启用开关 + 可选剿灭
-    enabled = [k for k, v in (cfg.get("tasks") or {}).items() if v]
-    if (cfg.get("annihilation") or {}).get("enabled"):
-        enabled.append("annihilation")
     if not enabled:
         maa_log.log(f"{trigger}: 未启用任何任务, 已跳过一键长草")
         await _auto_exit_cloud_game(trigger, owned, maa_log)
@@ -896,7 +1041,7 @@ async def _run_daily_flow(trigger: str) -> tuple:
 _bg_tasks: set = set()
 
 
-def _spawn_bg(coro) -> None:
+def _spawn_bg(coro) -> asyncio.Task:
     """把协程放到后台执行并保留引用, 异常写日志(不打断调用方)。"""
     task = asyncio.create_task(coro)
     _bg_tasks.add(task)
@@ -904,6 +1049,7 @@ def _spawn_bg(coro) -> None:
     task.add_done_callback(
         lambda t: logging.error("后台任务异常: %s", t.exception())
         if not t.cancelled() and t.exception() else None)
+    return task
 
 
 async def handle_maa_daily_test(request: web.Request):
@@ -912,7 +1058,7 @@ async def handle_maa_daily_test(request: web.Request):
     说明: 不影响 last_daily_run 记录(当天定时仍会照常触发); 因等待云游戏就绪耗时较长,
     这里后台执行并立即返回, 进度请查看一键长草日志。
     """
-    if _get_coord().running:
+    if _get_coord().running or _multi_busy():
         return web.json_response(
             {"status": "error", "message": "已有一键长草任务在运行"}, status=400)
     _spawn_bg(_run_daily_flow("测试执行"))
@@ -962,10 +1108,13 @@ async def daily_checker():
 
 
 async def handle_maa_stop(request: web.Request):
-    """停止当前运行的 MAA 任务。"""
+    """停止当前运行的 MAA 任务(多账号模式下同时终止剩余账号)。"""
+    global _multi_stop_requested
+    _multi_stop_requested = True
     coord = _get_coord()
     stopped = coord.stop()
-    return web.json_response({"status": "ok", "stopped": stopped})
+    return web.json_response(
+        {"status": "ok", "stopped": stopped, "multi_running": _multi_busy()})
 
 
 async def handle_maa_status(request: web.Request):
@@ -975,6 +1124,9 @@ async def handle_maa_status(request: web.Request):
     # 附带轻量游戏状态(不请求外部剩余时长 API, 保持低延迟)
     snap["game"] = await status_payload(with_remaining=False)
     snap["ws_clients"] = sum(1 for w in _ws_clients if not w.closed)
+    # 多账号状态: 供前端展示账号进度与账号列表(不含 token)
+    snap["multi_account"] = {"enabled": accounts_store.auto_switch, **_multi_progress}
+    snap["accounts"] = accounts_store.public_list()
     return web.json_response(snap)
 
 # --- 网易云游戏账号登录接口(WebUI 账号卡片) ---
@@ -1007,17 +1159,23 @@ async def handle_login_sms(request: web.Request):
         {"status": "ok", "message": result.get("message", "验证码已发送")})
 
 
-def _apply_login_token(token: str, source: str) -> str:
-    """登录成功后统一处理: token 落盘 + 进程内状态更新。
+def _apply_login_token(token: str, source: str, phone: str = "") -> str:
+    """登录成功后统一处理: token 落盘 + 多账号登记 + 进程内状态更新。
 
     Args:
         token: 新登录 token
         source: 登录方式(日志用: sms/password)
+        phone: 登录手机号(有效时自动登记/更新多账号列表并设为当前账号)
 
     Returns:
         面向用户的提示文案(云游戏会话进行中时说明"下次启动生效")
     """
     saved = save_token(token, TOKEN_FILE)
+    is_new = False
+    pnum = normalize_phone(phone)
+    if pnum:
+        is_new = accounts_store.upsert(pnum, token)
+        accounts_store.set_current(pnum)
     # 云游戏会话进行中: token 变更只落盘, 避免影响当前会话的退出/签到使用的账号
     session_active = bool(app_state.cloud_game_task and not app_state.cloud_game_task.done())
     if session_active:
@@ -1025,10 +1183,12 @@ def _apply_login_token(token: str, source: str) -> str:
     else:
         app_state.token = token
         message = "登录成功"
+    if pnum:
+        message += f"; 已{'添加' if is_new else '更新'}账号 {mask_phone(pnum)}"
     if not saved:
         message += "; 但 token 落盘失败, 重启后需重新登录"
-    logging.info("云游戏账号登录成功(source=%s, token_saved=%s, session_active=%s)",
-                 source, saved, session_active)
+    logging.info("云游戏账号登录成功(source=%s, token_saved=%s, session_active=%s, phone=%s)",
+                 source, saved, session_active, mask_phone(pnum) if pnum else "-")
     return message
 
 
@@ -1060,7 +1220,7 @@ async def handle_login_verify(request: web.Request):
             {"status": "error", "message": result.get("message", "登录失败")}, status=400)
 
     return web.json_response(
-        {"status": "ok", "message": _apply_login_token(result["token"], "sms")})
+        {"status": "ok", "message": _apply_login_token(result["token"], "sms", phone)})
 
 
 async def handle_login_password(request: web.Request):
@@ -1095,7 +1255,7 @@ async def handle_login_password(request: web.Request):
             {"status": "error", "message": result.get("message", "登录失败")}, status=400)
 
     return web.json_response(
-        {"status": "ok", "message": _apply_login_token(result["token"], "password")})
+        {"status": "ok", "message": _apply_login_token(result["token"], "password", phone)})
 
 
 async def handle_login_status(request: web.Request):
@@ -1104,7 +1264,15 @@ async def handle_login_status(request: web.Request):
     remaining=1 时额外拉取云游戏剩余时长(较慢, 前端仅在页面加载与登录后调用)。
     """
     token = app_state.token or read_token(TOKEN_FILE) or ""
-    payload = {"status": "ok", "logged_in": bool(token)}
+    current_acc = accounts_store.current()
+    payload = {
+        "status": "ok",
+        "logged_in": bool(token or current_acc),
+        # 当前账号(脱敏), 便于前端提示"当前使用哪个账号"
+        "account": mask_phone(current_acc["phone"]) if current_acc else "",
+        "accounts": accounts_store.public_list(),
+        "auto_switch": accounts_store.auto_switch,
+    }
     if token and request.query.get("remaining") == "1":
         loop = asyncio.get_running_loop()
         try:
@@ -1115,6 +1283,140 @@ async def handle_login_status(request: web.Request):
         if info:
             payload["remaining_time"] = info.get("free_time_left")
     return web.json_response(payload)
+
+
+# --- 多账号管理接口(WebUI 账号列表) ---
+
+def _accounts_payload() -> dict:
+    """账号列表的统一下发负载(绝不包含 token)。"""
+    return {
+        "status": "ok",
+        "auto_switch": accounts_store.auto_switch,
+        "current": mask_phone(accounts_store.current_phone())
+        if accounts_store.current_phone() else "",
+        "accounts": accounts_store.public_list(),
+    }
+
+
+def _activate_account(phone: str) -> tuple:
+    """把指定账号设为当前账号: token 落盘, 无会话时同步到进程内。
+
+    Returns:
+        (ok, message): ok 表示切换成功(账号存在)
+    """
+    acc = accounts_store.get(phone)
+    if not acc:
+        return False, "账号不存在"
+    accounts_store.set_current(acc["phone"])
+    saved = save_token(acc["token"], TOKEN_FILE)
+    # 云游戏会话进行中: 只落盘, 当前会话继续使用原账号(退出/签到不受影响)
+    session_active = bool(app_state.cloud_game_task and not app_state.cloud_game_task.done())
+    if not session_active:
+        app_state.token = acc["token"]
+    message = f"已切换到账号 {mask_phone(acc['phone'])}"
+    if session_active:
+        message += "(当前云游戏会话仍使用原账号, 下次启动生效)"
+    if not saved:
+        message += "; 但 token 落盘失败, 重启后需重新登录"
+    return True, message
+
+
+async def _read_json_obj(request: web.Request):
+    """读取 JSON 对象请求体; 失败返回 (None, 错误响应)。"""
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, AttributeError):
+        return None, web.json_response(
+            {"status": "error", "message": "请求体不是合法 JSON"}, status=400)
+    if not isinstance(data, dict):
+        return None, web.json_response(
+            {"status": "error", "message": "请求体必须是 JSON 对象"}, status=400)
+    return data, None
+
+
+async def handle_accounts_get(request: web.Request):
+    """查询多账号列表: GET /api/accounts。"""
+    return web.json_response(_accounts_payload())
+
+
+async def handle_accounts_switch(request: web.Request):
+    """切换当前账号: POST /api/accounts/switch {"phone": "..."}。"""
+    if _multi_busy():
+        return web.json_response(
+            {"status": "error", "message": "多账号任务执行中, 请先停止再切换账号"}, status=400)
+    data, err = await _read_json_obj(request)
+    if err:
+        return err
+    ok, message = _activate_account(str(data.get("phone", "")))
+    if not ok:
+        return web.json_response({"status": "error", "message": message}, status=400)
+    logging.info("已切换当前账号: %s", mask_phone(data.get("phone")))
+    return web.json_response({"status": "ok", "message": message, **_accounts_payload()})
+
+
+async def handle_accounts_toggle(request: web.Request):
+    """启用/停用账号参与轮流执行: POST /api/accounts/toggle {"phone","enabled"}。"""
+    if _multi_busy():
+        return web.json_response(
+            {"status": "error", "message": "多账号任务执行中, 请先停止再修改账号"}, status=400)
+    data, err = await _read_json_obj(request)
+    if err:
+        return err
+    phone = str(data.get("phone", ""))
+    enabled = bool(data.get("enabled", True))
+    if not accounts_store.set_enabled(phone, enabled):
+        return web.json_response(
+            {"status": "error", "message": "账号不存在"}, status=400)
+    return web.json_response({
+        "status": "ok",
+        "message": f"账号 {mask_phone(phone)} 已{'启用' if enabled else '停用'}轮流执行",
+        **_accounts_payload(),
+    })
+
+
+async def handle_accounts_remove(request: web.Request):
+    """从轮流列表移除账号: POST /api/accounts/remove {"phone": "..."}。
+
+    说明: 仅从多账号列表移除, 不注销当前登录/不影响 token 文件。
+    """
+    if _multi_busy():
+        return web.json_response(
+            {"status": "error", "message": "多账号任务执行中, 请先停止再修改账号"}, status=400)
+    data, err = await _read_json_obj(request)
+    if err:
+        return err
+    phone = str(data.get("phone", ""))
+    was_current = accounts_store.current_phone() == normalize_phone(phone)
+    if not accounts_store.remove(phone):
+        return web.json_response(
+            {"status": "error", "message": "账号不存在"}, status=400)
+    message = f"已从列表移除账号 {mask_phone(phone)}"
+    # 移除的是当前账号: 顺延到剩余账号(保证 token 文件与当前账号一致)
+    if was_current and accounts_store.current_phone():
+        ok, switch_msg = _activate_account(accounts_store.current_phone())
+        if ok:
+            message += f"; {switch_msg}"
+    return web.json_response({"status": "ok", "message": message, **_accounts_payload()})
+
+
+async def handle_accounts_auto(request: web.Request):
+    """启用/关闭多账号轮流执行: POST /api/accounts/auto {"enabled": bool}。"""
+    if _multi_busy():
+        return web.json_response(
+            {"status": "error", "message": "多账号任务执行中, 请先停止再修改设置"}, status=400)
+    data, err = await _read_json_obj(request)
+    if err:
+        return err
+    enabled = bool(data.get("enabled", False))
+    accounts_store.set_auto_switch(enabled)
+    count = len(accounts_store.enabled_accounts())
+    message = "多账号轮流执行已开启"
+    if enabled and count < 2:
+        message += f"(当前仅 {count} 个启用账号, 至少需要 2 个才会轮流执行)"
+    elif not enabled:
+        message = "多账号轮流执行已关闭"
+    return web.json_response(
+        {"status": "ok", "message": message, **_accounts_payload()})
 
 
 # --- 云游戏连接逻辑 ---
@@ -1242,7 +1544,7 @@ async def run_cloud_game():
 
 
 async def cleanup_background_tasks(app: web.Application):
-    global _daily_checker_task
+    global _daily_checker_task, _multi_stop_requested, _multi_flow_task
     if _daily_checker_task:
         _daily_checker_task.cancel()
         try:
@@ -1250,6 +1552,15 @@ async def cleanup_background_tasks(app: web.Application):
         except asyncio.CancelledError:
             pass
         _daily_checker_task = None
+    # 多账号流程: 先请求停止再取消, 避免继续切换/启动下一个账号
+    _multi_stop_requested = True
+    if _multi_flow_task and not _multi_flow_task.done():
+        _multi_flow_task.cancel()
+        try:
+            await _multi_flow_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _multi_flow_task = None
     if app_state.cloud_game_task and not app_state.cloud_game_task.done():
         print(f"\n{Colors.CYAN}Server shutting down. Cleaning up active cloud game connection...{Colors.RESET}")
         app_state.cloud_game_task.cancel()
@@ -1355,6 +1666,12 @@ async def run_server():
     app = web.Application()
     # 启动时预加载 token 文件: 存在 token 即视为「已登录」(签到/密码登录等无需先启动云游戏)
     app_state.token = app_state.token or read_token(TOKEN_FILE) or ""
+    # 多账号: token 文件缺失时用当前账号的 token 恢复(避免文件被删后无法自动启动)
+    if not app_state.token:
+        current_acc = accounts_store.current()
+        if current_acc and save_token(current_acc["token"], TOKEN_FILE):
+            app_state.token = current_acc["token"]
+            logging.info("已从多账号列表恢复当前账号 token")
     # WebUI 静态资源(style.css / app.js 等)
     if os.path.isdir(os.path.join(WEBUI_DIR, "static")):
         app.router.add_static("/static/", os.path.join(WEBUI_DIR, "static"), name="webui_static")
@@ -1381,6 +1698,12 @@ async def run_server():
         web.post('/api/login/verify', handle_login_verify),
         web.post('/api/login/password', handle_login_password),
         web.get('/api/login/status', handle_login_status),
+        # 多账号管理(账号列表/切换当前账号/启停/移除/轮流执行开关)
+        web.get('/api/accounts', handle_accounts_get),
+        web.post('/api/accounts/switch', handle_accounts_switch),
+        web.post('/api/accounts/toggle', handle_accounts_toggle),
+        web.post('/api/accounts/remove', handle_accounts_remove),
+        web.post('/api/accounts/auto', handle_accounts_auto),
         # 每日定时「测试执行」: 立即跑一次 启动云游戏 → 一键长草
         web.post('/maa/daily/test', handle_maa_daily_test),
     ])

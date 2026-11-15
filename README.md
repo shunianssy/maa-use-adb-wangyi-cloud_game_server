@@ -21,6 +21,7 @@
 
 -   **网页控制台**：浏览器内实时查看云游戏画面（WebRTC 拉流、约 8 FPS 推送），支持单击点击、按住拖拽滑动（兼容触屏）、文本输入、截图保存、坐标显示。
 -   **账号登录**：网页控制台内支持「短信验证码」与「手机号 + 密码」两种登录方式（密码登录需当前 token 有效，加密流程与网页端一致）；存在 token 文件即显示「已登录」，token 自动落盘复用。
+-   **多账号轮流执行**：登录过的账号自动加入账号列表（每个账号的 token 独立保存）；勾选「多账号轮流执行」后，一键长草与每日定时会按列表顺序逐个账号执行「切换账号 → 启动云游戏 → 一键长草 → 断开」，前一个账号完成后自动切换到下一个账号继续执行任务，单个账号失败/超时不影响后续账号。
 -   **一键长草**：开始唤醒、领取奖励、自动公招、基建换班、每周剿灭、库存保持、理智作战、信用收支，按依赖顺序自动排队执行；勾选「开始唤醒」时若云游戏未连接会自动先启动云游戏；单个任务内子任务出错达到 5 次时自动跳过该任务并继续后续任务。
 -   **库存保持**：勾选后先扫描仓库（MaaCore 仓库识别），按目标库存计算缺口并规划下一次理智作战（指定关卡 + 掉落停止条件、次数 AUTO，刷够缺口或理智耗尽即停），界面显示"下次打什么、哪一关"；优先级：每周剿灭 > 库存保持 > 理智作战配置。预设保持项：低级芯片（全职业，默认 20）、高级芯片组（全职业，默认 20）、采购凭证/红票（默认 20）、技巧概要·卷3（默认 200），目标数量可修改。资源关卡按开放日轮换（芯片本 PR-A/B/C/D、AP-5、CA-5），规划时自动跳过当天未开放的关卡并在日志提示下次开放日，避免 MAA 导航到关闭关卡而卡住。
 -   **作战可配置**：关卡、战斗次数（数字 / AUTO 刷完当前理智自动停）、理智药（关 / AUTO / 指定数量）、剿灭（AUTO 刷满止 / 固定场次）、领取奖励细分项，设置即时保存到 `maa_settings.json`。
@@ -272,6 +273,16 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111",
 curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111","password":"你的密码"}' http://127.0.0.1:22888/api/login/password
 ```
 
+### 多账号（轮流执行）
+
+-   每次登录成功都会把手机号与 token 记入 `accounts.json`（已加入 `.gitignore`，接口只下发脱敏手机号，不返回 token）；登录多个账号即可形成账号列表。
+-   账号列表支持「切换」（设为当前账号）、「启用/停用」（是否参与轮流执行）与「移除」（仅移出列表，不影响当前登录）。
+-   勾选「多账号轮流执行」后（需至少 2 个启用账号）：
+    -   **一键长草**：后台按列表顺序逐个账号执行「切换账号 → 启动云游戏 → 一键长草 → 断开」；
+    -   **每日定时 / 测试执行**：同样按账号顺序执行全套流程，每个账号执行完立即断开，节省云游戏时长；
+    -   单个账号启动失败或等待就绪超时会记录日志并继续下一个账号；点「停止」会终止当前账号并跳过剩余账号。
+-   账号管理接口：`GET /api/accounts`、`POST /api/accounts/switch`、`POST /api/accounts/toggle`、`POST /api/accounts/remove`、`POST /api/accounts/auto`。
+
 ---
 
 ## 环境变量配置
@@ -280,6 +291,7 @@ curl.exe -X POST -H "Content-Type: application/json" -d '{"phone":"13800001111",
 | --- | --- | --- |
 | `NETEASE_TOKEN` | 空 | 登录凭证；无交互部署时自动写入 token 文件 |
 | `NETEASE_TOKEN_FILE` | `token` | token 文件路径 |
+| `NETEASE_ACCOUNTS_FILE` | `accounts.json` | 多账号列表文件路径（含各账号 token，已加入 `.gitignore`；容器部署默认指向 `/app/data/accounts.json`） |
 | `NETEASE_API_BASE` | `https://n.cg.163.com` | 云游戏开放接口根地址（网页控制台登录使用，可指向代理或测试服务） |
 | `NETEASE_GAME_CODE` | `mrfz` | 游戏代码，`mrfz` 即《明日方舟》 |
 | `NETEASE_HOST` / `NETEASE_PORT` | `127.0.0.1` / `22888` | API 服务监听地址与端口 |
@@ -420,9 +432,10 @@ docker run --rm \
 | `/app/maa_data` | MAA 核心与资源 | `-v ./maa_data:/app/maa_data` |
 | `/app/data/maa_settings.json` | 一键长草设置 | `-v ./data:/app/data` |
 | `/app/data/token` | 登录 token | 同上 |
+| `/app/data/accounts.json` | 多账号列表与各账号 token | 同上 |
 | `/app/data/logs` | 任务日志 | 同上 |
 
-> 手动 `docker run` 部署（方式二）时，请自行追加 `-v "$PWD/data:/app/data"` 并设置 `NETEASE_MAA_SETTINGS=/app/data/maa_settings.json`、`NETEASE_TOKEN_FILE=/app/data/token`、`MAA_LOG_DIR=/app/data/logs`。
+> 手动 `docker run` 部署（方式二）时，请自行追加 `-v "$PWD/data:/app/data"` 并设置 `NETEASE_MAA_SETTINGS=/app/data/maa_settings.json`、`NETEASE_TOKEN_FILE=/app/data/token`、`NETEASE_ACCOUNTS_FILE=/app/data/accounts.json`、`MAA_LOG_DIR=/app/data/logs`。
 
 ### 访问与验证
 

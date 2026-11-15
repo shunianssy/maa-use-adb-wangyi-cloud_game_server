@@ -594,12 +594,15 @@ class TaskStatus:
         self._inventory_plan: Optional[Dict] = None   # 库存保持规划结果(供 WebUI 展示)
 
     # ---- 写(协调器线程) ----
-    def start_run(self, tasks: List[str], labels: Optional[List[str]] = None) -> None:
+    def start_run(self, tasks: List[str], labels: Optional[List[str]] = None,
+                  keep_log: bool = False, title: str = "") -> None:
         """开始一轮运行: 复位状态并打开日志文件。
 
         Args:
             tasks: 任务 key 列表(用于总进度与状态快照)
             labels: 可选的可读展示名列表(与 tasks 一一对应, 仅用于日志展示)
+            keep_log: 是否保留上一轮的日志(多账号轮流执行时使用, 便于连续查看)
+            title: 本轮运行的标题(如"账号 138****1111 (1/2)", 写入首行)
         """
         with self._lock:
             self._state = self.RUNNING
@@ -608,7 +611,16 @@ class TaskStatus:
             self._total = list(tasks)
             self._error = ""
             self._inventory_plan = None   # 每轮运行复位, 由库存保持任务重新规划
-            self._log = ["开始执行, 任务序列: " + ", ".join(labels or tasks)]
+            header = []
+            if title:
+                header.append(f"===== {title} =====")
+            header.append("开始执行, 任务序列: " + ", ".join(labels or tasks))
+            if keep_log:
+                self._log.extend(header)
+                # 环形截断: 跨账号保留日志时同样限制行数, 防止无限增长
+                self._log = self._log[-self._max_log_lines:]
+            else:
+                self._log = header
             self._open_log_file()
 
     def _open_log_file(self) -> None:
@@ -733,6 +745,8 @@ class MaaCoordinator:
         self._options: Dict = {}        # 本次运行的作战选项(fight/annihilation)
         self._signin: bool = False      # 运行前先执行网易云游戏签到
         self._token: Optional[str] = None  # 签到时使用的云游戏登录 token
+        self._keep_log: bool = False    # 是否保留上一轮日志(多账号轮流执行)
+        self._title: str = ""           # 本轮运行标题(多账号时标注账号)
         self.status = TaskStatus()
 
         # 当前执行中的任务(key 与 MaaCore 类型), 供回调把任务链名映射为可读名称
@@ -757,7 +771,8 @@ class MaaCoordinator:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self, enabled_tasks: List[str], options: Optional[dict] = None,
-              signin: bool = False, token: Optional[str] = None) -> bool:
+              signin: bool = False, token: Optional[str] = None,
+              keep_log: bool = False, title: str = "") -> bool:
         """启动协调线程执行指定任务(按依赖顺序过滤)。
 
         Args:
@@ -765,6 +780,8 @@ class MaaCoordinator:
             options: 作战选项 {"fight": {...}, "annihilation": {...}}
             signin: 是否在任务前先执行网易云游戏签到
             token: 签到时使用的登录 token
+            keep_log: 是否保留上一轮日志(多账号轮流执行时跨账号连续展示)
+            title: 本轮运行标题(如"账号 138****1111 (1/2)")
         """
         if self.running:
             logger.warning("MAA coordinator already running, ignored")
@@ -782,6 +799,8 @@ class MaaCoordinator:
         self._options = options or {}
         self._signin = bool(signin)
         self._token = token
+        self._keep_log = bool(keep_log)
+        self._title = str(title or "")
         self._stop_flag.clear()
         self._thread = threading.Thread(
             target=self._run, args=(tasks,), name="maa-coordinator", daemon=True)
@@ -806,7 +825,8 @@ class MaaCoordinator:
         不走 build_task_params 的常规参数构造路径。
         """
         self.status.start_run(
-            tasks, [task_display_name(t, DEFAULT_TASK_MAP.get(t, t)) for t in tasks])
+            tasks, [task_display_name(t, DEFAULT_TASK_MAP.get(t, t)) for t in tasks],
+            keep_log=self._keep_log, title=self._title)
         try:
             logger.info("启动 MAA 一键长草, 任务序列: %s",
                         ", ".join(task_display_name(t, DEFAULT_TASK_MAP.get(t, t)) for t in tasks))

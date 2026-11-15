@@ -23,6 +23,7 @@ services:
       # 一键长草设置(maa_settings.json)、登录 token、日志都不会被重置。
       - NETEASE_MAA_SETTINGS=/app/data/maa_settings.json
       - NETEASE_TOKEN_FILE=/app/data/token
+      - NETEASE_ACCOUNTS_FILE=/app/data/accounts.json
       - MAA_LOG_DIR=/app/data/logs
       # 无交互登录: 填入登录后获得的 token(也可起来后在网页控制台登录)
       # - NETEASE_TOKEN=your-token-here

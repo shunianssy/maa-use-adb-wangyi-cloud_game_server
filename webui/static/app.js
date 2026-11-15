@@ -756,6 +756,13 @@
       // 用 /maa/status 随带的服务状态兜底同步云游戏连接 UI
       // 防止 WS 消息时序导致页面停留在「未连接」占位
       syncGameFromStatus(s.game);
+      // 账号列表与当前账号可能被多账号流程改动, 随轮询同步
+      if (Array.isArray(s.accounts)) {
+        renderAccounts({
+          accounts: s.accounts,
+          auto_switch: s.multi_account && s.multi_account.enabled,
+        });
+      }
       // 渲染一键长草日志(每次轮询刷新)
       renderMaaLog(s.log);
       // 展示日志落盘路径(便于远端下载/调试)
@@ -769,11 +776,17 @@
           ? `下次理智作战: ${p.stage} · ${p.item_name} 缺 ${p.gap} (现有 ${p.have}/目标 ${p.target})`
           : "下次理智作战: —";
       }
-      if (s.state === "running") {
+      const multi = s.multi_account || {};
+      const multiRunning = !!multi.running;
+      const multiPrefix = multiRunning && multi.total
+        ? `账号 ${multi.index}/${multi.total}(${multi.phone || "-"}) · ` : "";
+      if (s.state === "running" || multiRunning) {
         setMaaStatus("running");
-        els.maaProgress.textContent =
-          `已完成 ${s.finished.length}/${s.total.length}` +
-          (s.current ? ` · 正在: ${s.current}` : "");
+        const taskText = s.state === "running"
+          ? `已完成 ${s.finished.length}/${s.total.length}` +
+            (s.current ? ` · 正在: ${s.current}` : "")
+          : "准备下一个账号…";
+        els.maaProgress.textContent = multiPrefix + taskText;
       } else if (s.state === "error") {
         setMaaStatus("error");
         els.maaProgress.textContent = s.error || "";
@@ -813,7 +826,7 @@
     if (els.btnLoginSms) els.btnLoginSms.hidden = pwdMode;
     setLoginNote(pwdMode
       ? "密码登录需当前 token 有效; 若已失效请改用短信验证码登录"
-      : "登录成功后 token 自动保存, 启动云游戏时自动使用");
+      : "登录成功后 token 自动保存并加入下方账号列表, 启动云游戏时自动使用");
   }
 
   /* 查询登录状态(带剩余时长): 页面加载与登录成功后各调用一次 */
@@ -825,15 +838,132 @@
       if (data && data.logged_in) {
         // 存在 token 文件即视为已登录(可免短信/密码直接启动云游戏与签到)
         setLoginStatus("done", "已登录");
+        const who = data.account ? `当前账号 ${data.account}` : "已登录";
         setLoginNote(data.remaining_time != null
-          ? `已登录, 云游戏剩余时长 ${formatRemaining(data.remaining_time)}`
-          : "已登录(未取到剩余时长, 可点「断开连接」后重试)");
+          ? `${who}, 云游戏剩余时长 ${formatRemaining(data.remaining_time)}`
+          : `${who}(未取到剩余时长, 可点「断开连接」后重试)`);
+        // 登录状态接口同时下发账号列表, 直接用于刷新列表(避免额外请求)
+        if (Array.isArray(data.accounts)) renderAccounts(data);
       } else {
         setLoginStatus("idle", "未登录");
         setLoginNote("登录成功后 token 自动保存, 启动云游戏时自动使用");
       }
     } catch (e) {
       // 服务未就绪时静默, 由轮询/下次操作再刷新
+    }
+  }
+
+  /* ---------- 多账号(列表 / 切换当前账号 / 轮流执行) ---------- */
+
+  /* 渲染账号列表: 手机号(脱敏) + 当前标记 + 启用开关 + 切换/移除按钮 */
+  function renderAccounts(data) {
+    if (!els.accountList) return;
+    const accounts = (data && data.accounts) || [];
+    if (els.multiAccountEnabled) {
+      els.multiAccountEnabled.checked = !!(data && data.auto_switch);
+    }
+    // 内容未变化时跳过重绘(轮询每 2 秒触发一次)
+    const key = JSON.stringify(accounts) + "|" + !!(data && data.auto_switch);
+    if (key === (els.accountList.dataset.lastKey || "")) return;
+    els.accountList.dataset.lastKey = key;
+    els.accountList.innerHTML = "";
+    if (!accounts.length) {
+      const li = document.createElement("li");
+      li.className = "account-empty";
+      li.textContent = "尚未添加账号: 上方登录成功后自动加入列表";
+      els.accountList.appendChild(li);
+      return;
+    }
+    accounts.forEach((acc) => {
+      const li = document.createElement("li");
+      li.className = "account-item" + (acc.current ? " is-current" : "");
+      li.dataset.phone = acc.phone;
+
+      const phone = document.createElement("span");
+      phone.className = "account-phone";
+      phone.textContent = acc.masked || acc.phone;
+      li.appendChild(phone);
+
+      if (acc.current) {
+        const tag = document.createElement("span");
+        tag.className = "account-tag";
+        tag.textContent = "当前";
+        li.appendChild(tag);
+      }
+
+      // 启用开关: 控制该账号是否参与轮流执行
+      const enableLabel = document.createElement("label");
+      enableLabel.className = "account-enabled";
+      enableLabel.title = "参与多账号轮流执行";
+      const enableBox = document.createElement("input");
+      enableBox.type = "checkbox";
+      enableBox.checked = !!acc.enabled;
+      enableBox.addEventListener("change", () => {
+        postAccount("/api/accounts/toggle",
+          { phone: acc.phone, enabled: enableBox.checked });
+      });
+      enableLabel.appendChild(enableBox);
+      enableLabel.appendChild(document.createTextNode("启用"));
+      li.appendChild(enableLabel);
+
+      if (!acc.current) {
+        const btnSwitch = document.createElement("button");
+        btnSwitch.className = "account-btn";
+        btnSwitch.type = "button";
+        btnSwitch.textContent = "切换";
+        btnSwitch.addEventListener("click", () => {
+          postAccount("/api/accounts/switch", { phone: acc.phone });
+        });
+        li.appendChild(btnSwitch);
+      }
+
+      const btnRemove = document.createElement("button");
+      btnRemove.className = "account-btn is-danger";
+      btnRemove.type = "button";
+      btnRemove.textContent = "移除";
+      btnRemove.addEventListener("click", () => {
+        const who = acc.masked || acc.phone;
+        if (!window.confirm(`确定从轮流列表移除账号 ${who} ?`)) return;
+        postAccount("/api/accounts/remove", { phone: acc.phone });
+      });
+      li.appendChild(btnRemove);
+
+      els.accountList.appendChild(li);
+    });
+  }
+
+  /* 账号相关 POST 请求的统一定制: 成功后刷新列表与登录提示 */
+  async function postAccount(url, body) {
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => null);
+      if (data && data.status === "ok") {
+        log("ok", data.message || "操作成功");
+        if (Array.isArray(data.accounts)) {
+          renderAccounts({ accounts: data.accounts, auto_switch: data.auto_switch });
+        }
+        loadLoginStatus();
+      } else {
+        log("fail", (data && data.message) || `操作失败(HTTP ${resp.status})`);
+        loadAccounts();   // 失败时以服务端列表为准, 回滚前端勾选状态
+      }
+    } catch (e) {
+      log("fail", `请求失败: ${e.message}`);
+    }
+  }
+
+  async function loadAccounts() {
+    if (!els.accountList) return;
+    try {
+      const resp = await fetch("/api/accounts");
+      const data = await resp.json();
+      renderAccounts(data);
+    } catch (e) {
+      // 服务未就绪时静默, 由轮询再刷新
     }
   }
 
@@ -1052,6 +1182,15 @@
     els.btnLoginPwdSubmit = $("btnLoginPwdSubmit");
     els.tabLoginSms = $("tabLoginSms");
     els.tabLoginPwd = $("tabLoginPwd");
+    // 多账号: 账号列表与「多账号轮流执行」开关
+    els.accountList = $("accountList");
+    els.multiAccountEnabled = $("multiAccountEnabled");
+    if (els.multiAccountEnabled) {
+      els.multiAccountEnabled.addEventListener("change", () => {
+        postAccount("/api/accounts/auto",
+          { enabled: els.multiAccountEnabled.checked });
+      });
+    }
     if (els.btnLoginSms) els.btnLoginSms.addEventListener("click", doSendLoginSms);
     if (els.btnLoginSubmit) els.btnLoginSubmit.addEventListener("click", doLoginSubmit);
     if (els.btnLoginPwdSubmit) els.btnLoginPwdSubmit.addEventListener("click", doLoginPassword);
@@ -1168,6 +1307,7 @@
     } catch (e) { /* 隐私模式忽略 */ }
     setLoginMode("sms");   // 默认短信验证码登录, 可切换到密码登录
     loadLoginStatus();
+    loadAccounts();        // 多账号列表(含轮流执行开关)
     connect();
   }
 

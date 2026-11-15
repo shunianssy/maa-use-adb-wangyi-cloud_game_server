@@ -5,6 +5,7 @@
 **/*.pyc
 .git
 token
+accounts.json
 demo.jpg
 demo2.png
 *.log

@@ -240,6 +240,20 @@ class TestTaskStatus(unittest.TestCase):
             st.log(f"line-{i}")
         self.assertLessEqual(len(st.snapshot()["log"]), 100)
 
+    def test_start_run_keep_log_and_title(self):
+        # 多账号轮流执行: keep_log=True 保留上一账号日志, title 写入账号标识
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(mc, "MAA_LOG_DIR", tmp):
+                st = mc.TaskStatus()
+                st.start_run(["awaken"], keep_log=True)
+                st.log("first-account")
+                st.start_run(["combat"], keep_log=True,
+                             title="账号 138****1111 (2/2)")
+                st.set_final("idle", "完成")
+                log = "\n".join(st.snapshot()["log"])
+                self.assertIn("first-account", log)
+                self.assertIn("138****1111", log)
+
     def test_log_autosaved_to_disk(self):
         # 日志必须自动落盘: start_run 创建文件, log 同步写入, 结束关闭句柄
         with tempfile.TemporaryDirectory() as tmp:
