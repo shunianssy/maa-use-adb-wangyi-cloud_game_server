@@ -18,9 +18,12 @@ services:
   netease-maa:
     build:
       context: .
+      # 若构建阶段出现域名解析失败(DNS 问题), 可取消下一行注释改用宿主网络后重试
+      # network: host
       args:
-        # Debian APT 镜像(阿里云)
+        # Debian APT 镜像(阿里云, 使用 HTTPS + 构建时强制 IPv4, 避免国内网络下 Ign/Err)
         APT_MIRROR: mirrors.aliyun.com
+        APT_MIRROR_SCHEME: https
         # PyPI 镜像(阿里云)
         PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
         PIP_TRUSTED_HOST: mirrors.aliyun.com

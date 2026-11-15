@@ -400,6 +400,10 @@ docker compose -f docker-compose.cn.yml up -d --build
 -   数据目录与默认配置一致（`./data`、`./maa_data`），两种 compose 文件可随时切换，账号与设置不会丢失。
 -   仅重建镜像（忽略缓存）：`docker compose -f docker-compose.cn.yml build --no-cache`。
 -   强制更新 MAA 核心/资源：`MAA_AUTO_PULL=force docker compose -f docker-compose.cn.yml up -d`。
+-   构建期 APT 默认使用阿里云 HTTPS 源，并强制 IPv4 + 重试 5 次（规避国内网络 IPv6/DNS 抖动导致的 `Ign`/`Err`）。若仍卡在 `apt-get update`，请检查 Docker Desktop / WSL 的 DNS 与代理设置后重试；也可用 `--build-arg` 临时换源，例如：
+    ```bash
+    docker build --build-arg APT_MIRROR=mirrors.aliyun.com --build-arg APT_MIRROR_SCHEME=http -t netease-cloud-game-maa .
+    ```
 -   `python:3.12-slim` 基础镜像拉取仍慢时，请为 Docker daemon 配置阿里云镜像加速器（阿里云容器镜像服务控制台 → 镜像工具 → 镜像加速器可获取专属地址）：
 
 ```json

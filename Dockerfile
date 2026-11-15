@@ -6,11 +6,13 @@
 FROM python:3.12-slim
 
 # 国内构建加速(可选): 通过 --build-arg 覆盖, 默认使用官方源
-#   APT_MIRROR      : Debian APT 镜像主机(如 mirrors.aliyun.com)
-#   PIP_INDEX_URL   : PyPI 镜像地址(如 https://mirrors.aliyun.com/pypi/simple/)
-#   PIP_TRUSTED_HOST: PyPI 镜像主机(https 镜像可省略)
+#   APT_MIRROR        : Debian APT 镜像主机(如 mirrors.aliyun.com)
+#   APT_MIRROR_SCHEME : APT 镜像协议(http/https, 国内建议 https)
+#   PIP_INDEX_URL     : PyPI 镜像地址(如 https://mirrors.aliyun.com/pypi/simple/)
+#   PIP_TRUSTED_HOST  : PyPI 镜像主机(https 镜像可省略)
 # 使用 docker-compose.cn.yml 时会自动传入阿里云镜像参数
 ARG APT_MIRROR="deb.debian.org"
+ARG APT_MIRROR_SCHEME="http"
 ARG PIP_INDEX_URL=""
 ARG PIP_TRUSTED_HOST=""
 
@@ -29,14 +31,21 @@ COPY requirements.txt ./
 #   说明: 官方 libMaaCore.so 及其随包库仅依赖基础 glibc(libc/libdl/libm/libpthread/
 #         libgcc_s/librt), 与 python:3.12-slim(Debian) 自带一致, 无需额外安装
 #   APT_MIRROR: 传入镜像主机时替换 Debian 默认源(兼容 deb822/debian.sources 与旧 sources.list)
-RUN if [ "${APT_MIRROR}" != "deb.debian.org" ]; then \
-        sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null \
-        || sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null \
+#   同时强制 IPv4 + 重试: 国内 Docker 构建常因 IPv6/DNS 抖动出现 Ign/Err, 强制 IPv4 更稳
+RUN set -eux; \
+    if [ "${APT_MIRROR}" != "deb.debian.org" ]; then \
+        sed -i -E "s|https?://deb\.debian\.org|${APT_MIRROR_SCHEME}://${APT_MIRROR}|g" \
+            /etc/apt/sources.list.d/debian.sources 2>/dev/null \
+        || sed -i -E "s|https?://deb\.debian\.org|${APT_MIRROR_SCHEME}://${APT_MIRROR}|g" \
+            /etc/apt/sources.list 2>/dev/null \
         || true; \
-    fi \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+        printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+            > /etc/apt/apt.conf.d/99china-mirror; \
+        echo "[build] APT mirror: ${APT_MIRROR_SCHEME}://${APT_MIRROR}"; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ffmpeg ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
 
 # PyPI 镜像: 传入 PIP_INDEX_URL 时走镜像(国内加速), 否则直连官方源
 RUN if [ -n "${PIP_INDEX_URL}" ]; then \
