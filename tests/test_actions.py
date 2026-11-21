@@ -207,7 +207,8 @@ class DailyFlowAutoCloseTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "_get_coord", return_value=self._fake_coord()), \
              patch.object(server, "_handle_start_internal",
                           new=AsyncMock(return_value=(True, "ok"))), \
-             patch.object(server, "_wait_game_ready", new=AsyncMock(return_value=True)), \
+             patch.object(server, "_wait_game_ready",
+                          new=AsyncMock(return_value=(True, ""))), \
              patch.object(server.maa_settings, "get",
                           return_value={"tasks": {}, "annihilation": {}}), \
              patch.object(server, "_auto_exit_cloud_game", new=AsyncMock()) as m_exit:
@@ -226,7 +227,8 @@ class DailyFlowAutoCloseTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "_get_coord", return_value=self._fake_coord()), \
              patch.object(server, "_handle_start_internal",
                           new=AsyncMock(return_value=(True, "ok"))), \
-             patch.object(server, "_wait_game_ready", new=AsyncMock(return_value=True)), \
+             patch.object(server, "_wait_game_ready",
+                          new=AsyncMock(return_value=(True, ""))), \
              patch.object(server.maa_settings, "get", return_value={
                  "tasks": {"awaken": True}, "annihilation": {},
                  "fight": {}, "infrast": {}, "award": {}, "inventory": {}, "signin": {}}), \

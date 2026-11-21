@@ -152,6 +152,7 @@ class AppState:
         self.token: Optional[str] = None
         self.cloud_game_task: Optional[asyncio.Task] = None
         self.shutdown_event: Optional[asyncio.Event] = None
+        self.last_error = ""   # 最近一次连接失败原因(供等待就绪的调用方诊断)
 
     def reset(self):
         self.pc = None
@@ -160,6 +161,7 @@ class AppState:
         self.is_ready = False
         self.token = None
         self.cloud_game_task = None
+        # 注意: 不清空 last_error —— 连接任务清理完后, 等待就绪的一方仍需读取失败原因
 
 app_state = AppState()
 
@@ -605,6 +607,7 @@ async def _handle_start_internal():
         return True, "Cloud game connection already active."
     if app_state.cloud_game_task and app_state.cloud_game_task.done():
         app_state.cloud_game_task = None
+    app_state.last_error = ""   # 新一次建连: 清空上一次的失败原因
     app_state.cloud_game_task = asyncio.create_task(run_cloud_game())
     return True, "Cloud game connection initiated."
 
@@ -782,10 +785,11 @@ async def handle_maa_start(request: web.Request):
         if not ok:
             coord.status.log(f"启动云游戏失败: {msg}")
             return web.json_response({"status": "error", "message": msg}, status=400)
-        if not await _wait_game_ready(90):
-            coord.status.log("等待云游戏就绪超时, 一键长草未执行")
+        ready, reason = await _wait_game_ready(90)
+        if not ready:
+            coord.status.log(f"等待云游戏就绪失败: {reason}, 一键长草未执行")
             return web.json_response(
-                {"status": "error", "message": "云游戏启动超时(请检查网络/账号剩余时长)"},
+                {"status": "error", "message": f"云游戏启动失败({reason}), 请检查网络/账号剩余时长"},
                 status=400)
         coord.status.log("云游戏已就绪, 开始执行一键长草")
 
@@ -885,14 +889,27 @@ async def handle_maa_signin(request: web.Request):
     return web.json_response({"status": "ok" if result.get("ok") else "error", "result": result})
 
 
-async def _wait_game_ready(timeout: float = 90.0) -> bool:
-    """轮询等待云游戏就绪(is_ready), 超时返回 False。"""
+async def _wait_game_ready(timeout: float = 90.0) -> tuple:
+    """轮询等待云游戏就绪(is_ready)。
+
+    连接任务提前结束(建连失败/视频流始终未到达)时立即返回, 不再空等整个超时窗口。
+
+    Returns:
+        (ok, reason): ok=False 时 reason 说明具体失败原因, 便于写入日志定位问题
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if app_state.is_ready:
-            return True
+            return True, ""
+        alive = (app_state.cloud_game_task
+                 and not app_state.cloud_game_task.done())
+        if app_state.last_error and not alive:
+            # 建连任务已结束且记录了失败原因: 继续等待也不会就绪
+            return False, app_state.last_error
         await asyncio.sleep(1)
-    return False
+    if app_state.last_error:
+        return False, app_state.last_error
+    return False, f"等待视频画面就绪超时({int(timeout)} 秒)"
 
 
 def _cloud_game_owned_by_flow() -> bool:
@@ -947,6 +964,41 @@ async def _watch_flow_and_exit_cloud_game(trigger: str, owned: bool, maa_log) ->
         logging.warning("%s: 等待一键长草结束超时, 跳过自动断开云游戏", trigger)
         return
     await _auto_exit_cloud_game(trigger, owned, maa_log)
+
+
+async def _start_game_and_wait_ready(maa_log, label: str,
+                                     attempts: int = 2,
+                                     ready_timeout: float = 90.0) -> tuple:
+    """启动云游戏并等待画面就绪, 未就绪时断开重试。
+
+    切换账号时上一个云游戏实例刚被释放, 新账号的实例分配/游戏冷启动会明显
+    慢于首次启动, 单次建连失败较常见; 这里重试一次避免整个账号被直接跳过。
+
+    Args:
+        maa_log: 一键长草日志(TaskStatus)
+        label: 日志前缀(如"账号 138****1111")
+        attempts: 最多尝试次数
+        ready_timeout: 每次等待就绪的上限(秒)
+
+    Returns:
+        (ok, reason): ok=False 时 reason 为最后一次失败原因
+    """
+    reason = ""
+    for attempt in range(1, attempts + 1):
+        ok, msg = await _handle_start_internal()
+        if ok:
+            ok, why = await _wait_game_ready(ready_timeout)
+            reason = why
+        else:
+            reason = msg
+        if ok:
+            return True, ""
+        await _handle_exit_internal()   # 释放失败会话, 避免影响下一次建连
+        if attempt < attempts:
+            maa_log.log(f"{label}: 第 {attempt}/{attempts} 次启动未就绪({reason}), "
+                        f"断开后 5 秒重试...")
+            await asyncio.sleep(5)
+    return False, reason
 
 
 def _multi_busy() -> bool:
@@ -1017,14 +1069,10 @@ async def _run_multi_account_flow(trigger: str,
             await _handle_exit_internal()
             app_state.token = acc["token"]
 
-            # 2) 用该账号启动云游戏并等待画面就绪
-            ok, msg = await _handle_start_internal()
+            # 2) 用该账号启动云游戏并等待画面就绪(实例刚释放时首帧可能偏慢, 失败重试一次)
+            ok, reason = await _start_game_and_wait_ready(maa_log, f"账号 {label}")
             if not ok:
-                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 启动云游戏失败: {msg}")
-                continue
-            if not await _wait_game_ready(90):
-                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 等待云游戏就绪超时")
-                await _handle_exit_internal()
+                maa_log.log(f"{trigger}: [{idx}/{total}] 账号 {label} 启动云游戏失败: {reason}")
                 continue
 
             # 3) 执行一键长草(任务与选项均来自该账号的独立配置)
@@ -1105,10 +1153,11 @@ async def _run_daily_flow(trigger: str, respect_weekdays: bool = False) -> tuple
     if not ok:
         maa_log.log(f"{trigger}: 启动云游戏失败: {msg}")
         return False, msg
-    if not await _wait_game_ready(90):
-        maa_log.log(f"{trigger}: 等待云游戏就绪超时")
+    ready, reason = await _wait_game_ready(90)
+    if not ready:
+        maa_log.log(f"{trigger}: 等待云游戏就绪失败: {reason}")
         await _auto_exit_cloud_game(trigger, owned, maa_log)  # 就绪失败也要释放连接
-        return False, "等待云游戏就绪超时"
+        return False, f"等待云游戏就绪失败: {reason}"
 
     if not enabled:
         maa_log.log(f"{trigger}: 未启用任何任务, 已跳过一键长草")
@@ -1581,6 +1630,11 @@ async def handle_accounts_auto(request: web.Request):
 
 
 # --- 云游戏连接逻辑 ---
+# 等待视频画面就绪的上限(秒): 需小于调用方 _wait_game_ready 的超时(90 秒),
+# 保证"视频始终没来"由连接任务自己判定并把原因回传给调用方。
+VIDEO_READY_TIMEOUT = 80.0
+
+
 async def run_cloud_game():
     try:
         # token 来源优先级: token 文件(含 WebUI 登录写入) -> NETEASE_TOKEN 环境变量 -> 终端交互登录
@@ -1601,6 +1655,7 @@ async def run_cloud_game():
                 token = read_token(TOKEN_FILE) or ""
                 if not token:
                     print(f"{Colors.RED}Login failed, exiting task.{Colors.RESET}", file=sys.stderr)
+                    app_state.last_error = "登录失败, 未获取到 token"
                     return
             else:
                 # 无 TTY 且无环境变量:明确报错而非阻塞(可先在 WebUI 账号卡片中登录)
@@ -1609,6 +1664,7 @@ async def run_cloud_game():
                        "or mount a token file.")
                 print(f"{Colors.RED}[!] {msg}{Colors.RESET}", file=sys.stderr)
                 logging.error(msg)
+                app_state.last_error = "未登录云游戏账号(token 缺失)"
                 return
 
         app_state.token = token
@@ -1644,17 +1700,30 @@ async def run_cloud_game():
         app_state.sock = sock
 
         print(f"{Colors.YELLOW}[*] Waiting for video stream...{Colors.RESET}")
-        if not app_state.snapshotter:
-            await asyncio.sleep(3)
-        
-        if app_state.snapshotter and await app_state.snapshotter.wait_ready():
+        # 视频轨/首帧可能明显晚于信令返回: 切换账号时实例需要重新分配, 游戏冷启动
+        # 常超过 20 秒。这里在整个就绪窗口内持续检查, 避免"稍后就绪"被误判为失败,
+        # 从而让等待方一直空等到超时。
+        ready = False
+        deadline = time.monotonic() + VIDEO_READY_TIMEOUT
+        while time.monotonic() < deadline:
+            snap = app_state.snapshotter
+            if snap and await snap.wait_ready(timeout=1.0):
+                ready = True
+                break
+            await asyncio.sleep(0.5)
+
+        if ready:
             app_state.is_ready = True
             print(f"{Colors.GREEN}{Colors.BOLD}[OK] Cloud game ready. API is active.{Colors.RESET}")
             await broadcast_status()  # 通知 WebUI 前端已就绪
         else:
             app_state.is_ready = False
-            print(f"{Colors.RED}[!] Failed to start video stream. API will not be functional.{Colors.RESET}", file=sys.stderr)
-            await broadcast_status()  # 通知前端连接失败
+            app_state.last_error = (f"云游戏已连接但 {int(VIDEO_READY_TIMEOUT)} 秒内"
+                                    f"未收到视频画面")
+            print(f"{Colors.RED}[!] Failed to start video stream: {app_state.last_error}"
+                  f"{Colors.RESET}", file=sys.stderr)
+            # 结束连接任务: 让等待就绪的一方立即拿到失败原因并重试, 而不是空等
+            raise RuntimeError(app_state.last_error)
 
         # Use a cancellable wait instead of Event().wait()
         # This allows the task to be properly cancelled by signals
@@ -1664,6 +1733,7 @@ async def run_cloud_game():
     except asyncio.CancelledError:
         print(f"\n{Colors.CYAN}[*] Cloud game task cancelled.{Colors.RESET}")
     except Exception as e:
+        app_state.last_error = app_state.last_error or f"云游戏连接异常: {e}"
         print(f"\n{Colors.RED}[!] An error occurred in cloud game task: {e}{Colors.RESET}", file=sys.stderr)
         logging.exception("Cloud game task error")
     finally:

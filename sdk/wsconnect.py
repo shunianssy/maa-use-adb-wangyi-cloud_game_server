@@ -77,8 +77,17 @@ def get_basic_info(token):
     headers = {
         "Authorization": "Bearer " +token
     }
-    info = requests.get("https://n.cg.163.com/api/v2/users/@me", headers=headers).text
-    info = json.loads(decode_mess(info))
+    try:
+        info = requests.get("https://n.cg.163.com/api/v2/users/@me",
+                            headers=headers, timeout=15).text
+    except requests.RequestException as e:
+        raise RuntimeError(f"获取云游戏账号信息失败: {e}") from e
+    try:
+        info = json.loads(decode_mess(info))
+    except Exception as e:
+        raise RuntimeError("云游戏账号信息解析失败(token 可能已失效)") from e
+    if not isinstance(info, dict) or "yunxin_account" not in info:
+        raise RuntimeError(f"云游戏账号信息异常(token 可能已失效): {str(info)[:120]}")
     return info["yunxin_account"]["accid"]
 
 def request_ticket(token, game_code, regions=["hdcz","hbsjz"], codecs = ["h264","vp8","vp9"], width = 1280, height = 720):
@@ -96,16 +105,28 @@ def request_ticket(token, game_code, regions=["hdcz","hbsjz"], codecs = ["h264",
         "Authorization": "Bearer " +token,
         "Content-Type": "application/octet-stream" 
     }
-    info = requests.post("https://n.cg.163.com/api/v2/tickets", headers=headers, data= req_str).text
+    try:
+        info = requests.post("https://n.cg.163.com/api/v2/tickets",
+                             headers=headers, data=req_str, timeout=15).text
+    except requests.RequestException as e:
+        raise RuntimeError(f"申请云游戏连接票据失败: {e}") from e
     info_obj = json.loads(decode_mess(info))
     print(info_obj)
-    return info_obj["gateway_url"]
+    gateway_url = info_obj.get("gateway_url") if isinstance(info_obj, dict) else None
+    if not gateway_url:
+        raise RuntimeError(f"申请云游戏连接票据失败: {str(info_obj)[:200]}")
+    return gateway_url
 
 def find_region(token, game_code):
     headers = {
         "Authorization": "Bearer " +token
     }
-    resp_text = decode_mess(requests.get("https://n.cg.163.com/api/v2/media-servers?game_code="+game_code, headers=headers).text)
+    try:
+        resp_text = decode_mess(requests.get(
+            "https://n.cg.163.com/api/v2/media-servers?game_code=" + game_code,
+            headers=headers, timeout=15).text)
+    except requests.RequestException as e:
+        raise RuntimeError(f"获取云游戏可用区域失败: {e}") from e
     r = json.loads(resp_text)
     # 服务端响应结构可能为:
     #   1) 旧版: 直接是 region 数组
@@ -142,16 +163,23 @@ def exit_game(token, game_code):
     # 注意: URL 需格式化 game_code(原代码遗漏了 {} 替换)
     url = f"https://n.cg.163.com/api/v2/users/@me/games-playing/{game_code}"
     try:
-        print(requests.delete(url, headers=headers).text)
+        print(requests.delete(url, headers=headers, timeout=15).text)
     except Exception as e:
         # 退出游戏失败不应阻断主流程(网络抖动/额度耗尽等)
         print(f"[warn] exit_game 失败(忽略): {e}")
+
+async def _close_quietly(websocket):
+    """尽力关闭 WebSocket(失败忽略), 避免建连异常时泄漏连接。"""
+    try:
+        await websocket.close()
+    except Exception:
+        pass
 
 async def connect(token, game_code, w=1280, h=720, quality="high", codecs=["h264","vp8","vp9"], platform=0, fps="30"):
         user_id = get_basic_info(token)
         regions = find_region(token, game_code)
         uri = request_ticket(token, game_code, regions=regions)
-        websocket = await websockets.connect(uri)
+        websocket = await websockets.connect(uri, open_timeout=15)
         auth_obj = { 
             "id": str(int(round(time.time() * 1000))),
             "op": "auth",
@@ -168,17 +196,27 @@ async def connect(token, game_code, w=1280, h=720, quality="high", codecs=["h264
             }
         }
         auth_str = json.dumps(auth_obj)
-        await websocket.send(auth_str)
-        auth_res = await websocket.recv()
+        try:
+            await websocket.send(auth_str)
+            # 服务端可能因排队/实例回收迟迟不下发 offer: 加超时避免无限挂起,
+            # 否则调用方只能等到整体就绪超时且看不到真正原因
+            auth_res = await asyncio.wait_for(websocket.recv(), timeout=20)
+        except asyncio.TimeoutError as e:
+            await _close_quietly(websocket)
+            raise RuntimeError("云游戏鉴权超时: 20 秒内未收到 offer(实例可能仍在回收/排队)") from e
+        except Exception as e:
+            await _close_quietly(websocket)
+            raise RuntimeError(f"云游戏鉴权请求失败: {e}") from e
         auth_res = decode_mess(auth_res)
         try:
             de_res = json.loads(auth_res)
-        except:
-            print("[x] something went wrong when decoding auth response")
-            exit(-1)
-        if de_res["op"] != "offer":
-            print("[x] "+ de_res["data"]["errmsg"])
-            exit(-1)
+        except Exception as e:
+            await _close_quietly(websocket)
+            raise RuntimeError(f"云游戏鉴权响应解析失败: {str(auth_res)[:120]}") from e
+        if de_res.get("op") != "offer":
+            await _close_quietly(websocket)
+            errmsg = (de_res.get("data") or {}).get("errmsg") or str(de_res)[:200]
+            raise RuntimeError(f"云游戏拒绝建连: {errmsg}")
         new_sdp = {}
         new_sdp["type"] = de_res["op"]
         new_sdp["sdp"] = de_res["data"]["sdp"]
