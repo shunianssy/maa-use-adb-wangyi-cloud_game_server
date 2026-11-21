@@ -52,26 +52,39 @@ def encode_mess(message):
     res = base64.b64encode(m)
     return res
 
+def _derive_sub_key(mess: bytes):
+    """从混淆报文中推导偏移 key(明文以 "[" 或 "{" 开头); 推导失败返回 None。"""
+    if len(mess) < 2:
+        return None
+    for j in range(256):
+        c0 = chr((mess[0] - j) % 256)
+        c1 = chr((mess[1] - j) % 256)
+        if c0 == "{" and c1 == '"':
+            return j
+        if c0 == "[" and c1 == "{" and len(mess) > 2 \
+                and chr((mess[2] - j) % 256) == '"':
+            return j
+    return None
+
 def decode_mess(message):
-    try:
-        mess = base64.b64decode(message)
-    except:
-        return message
     global sub_key
-    if sub_key == None:
-        fbyte = mess[0]
-        sbyte = mess[1]
-        for j in range(0, 256):
-            if(chr((fbyte-j)%256)=="[" and chr((sbyte-j)%256) == "{" and chr((mess[2]-j)%256) == "\""):
-                sub_key = j
-                break
-            if chr((fbyte-j)%256) == "{" and chr((sbyte-j)%256) == "\"":
-                sub_key = j
-                break
-    m = ""
-    for i in mess:
-         m += chr((i-sub_key)%256)
-    return m
+    text = (bytes(message).decode("utf-8", errors="replace")
+            if isinstance(message, (bytes, bytearray)) else str(message))
+    stripped = text.strip()
+    if stripped[:1] in ("{", "["):
+        return stripped   # 未混淆的明文, 原样返回
+    try:
+        mess = base64.b64decode(stripped)
+    except Exception:
+        return text
+    # 混淆 key 随会话变化: 每次解码都重新推导, 不能只认进程内第一次的 key,
+    # 否则切换账号后仍用上一个账号的 key 解码, 得到乱码导致 JSON 解析失败。
+    key = _derive_sub_key(mess)
+    if key is not None:
+        sub_key = key   # 同步给 encode_mess(后续请求体 / 输入命令)使用
+    if sub_key is None:
+        return text
+    return bytes((b - sub_key) % 256 for b in mess).decode("utf-8", errors="replace")
 
 def get_basic_info(token):
     headers = {
